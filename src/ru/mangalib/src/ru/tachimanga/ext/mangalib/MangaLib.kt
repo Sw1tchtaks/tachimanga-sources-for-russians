@@ -4,6 +4,7 @@ import androidx.preference.CheckBoxPreference
 import androidx.preference.EditTextPreference
 import androidx.preference.ListPreference
 import androidx.preference.PreferenceScreen
+import androidx.preference.SwitchPreferenceCompat
 import ru.tachimanga.common.GET
 import eu.kanade.tachiyomi.source.model.Filter
 import eu.kanade.tachiyomi.source.model.FilterList
@@ -57,10 +58,19 @@ class MangaLib : RuSource() {
     override val mirrors = listOf("Основной" to "https://mangalib.me")
 
     override val loginHelp: String =
-        "Введите ниже логин (e-mail) и пароль от MangaLib, затем откройте каталог: расширение войдёт само. " +
-            "Вход через Google/VK так не сработает — тогда вставьте токен в поле «Токен доступа». Без входа доступно почти всё, кроме 18+."
+        "1) Включите «Режим входа» ниже. 2) Откройте MangaLib, нажмите 🌐 и войдите в аккаунт. 3) Закройте WebView и выключите «Режим входа». " +
+            "Расширение получит вход само. Другой способ — логин и пароль ниже. Без входа доступно почти всё, кроме 18+."
 
     private val siteId = 1
+
+    private val loginMode: Boolean get() = preferences.getBoolean(PREF_LOGIN_MODE, false)
+
+    /** The real site address, even while the login mode is on. */
+    private val siteUrl: String get() = super.baseUrl
+
+    // While the login mode is on, the WebView button 🌐 opens the login server itself,
+    // so the app shares its cookies with the extension.
+    override val baseUrl: String get() = if (loginMode) AUTH_URL else super.baseUrl
 
     private val apiUrl: String get() = preferences.getString(PREF_API, API_DEFAULT) ?: API_DEFAULT
 
@@ -107,7 +117,7 @@ class MangaLib : RuSource() {
             runCatching { Thread { runCatching { validAccessToken(force = true) } }.start() }
         }
         val auth = cookieNames(AUTH_URL)
-        val site = cookieNames(baseUrl)
+        val site = cookieNames(siteUrl)
         val last = preferences.getString(PREF_LOGIN_DEBUG, null) ?: "попыток входа ещё не было"
         return "версия $VERSION_LABEL; cookie auth.lib.social: ${auth.size}" +
             (if (auth.isNotEmpty()) " (${auth.take(6).joinToString()})" else "") +
@@ -167,7 +177,7 @@ class MangaLib : RuSource() {
         val verifier = ByteArray(48).also(random::nextBytes).base64Url()
         val challenge = MessageDigest.getInstance("SHA-256").digest(verifier.toByteArray()).base64Url()
         val state = ByteArray(16).also(random::nextBytes).base64Url()
-        val redirectUri = "$baseUrl/ru/front/auth/oauth/callback"
+        val redirectUri = "$siteUrl/ru/front/auth/oauth/callback"
 
         var request: Request = GET(
             "$AUTH_URL/auth/oauth/authorize".toHttpUrl().newBuilder()
@@ -311,6 +321,7 @@ class MangaLib : RuSource() {
                     .putString(PREF_OAUTH_REFRESH, token["refresh_token"].str ?: preferences.getString(PREF_OAUTH_REFRESH, ""))
                     .putLong(PREF_OAUTH_EXPIRES, System.currentTimeMillis() + (token["expires_in"].long ?: 3600L) * 1000)
                     .putString(PREF_LOGIN_DEBUG, "вход выполнен автоматически")
+                    .putBoolean(PREF_LOGIN_MODE, false)
                     .apply()
                 access
             }.getOrElse {
@@ -329,7 +340,7 @@ class MangaLib : RuSource() {
     override fun headersBuilder(): Headers.Builder = super.headersBuilder()
         .set("Accept", "application/json, text/plain, */*")
         .set("Site-Id", siteId.toString())
-        .set("Origin", baseUrl)
+        .set("Origin", siteUrl)
 
     private val preferEnglish: Boolean get() = preferences.getString(PREF_TITLE_LANG, "rus") == "eng"
 
@@ -410,7 +421,7 @@ class MangaLib : RuSource() {
         return GET(url, headers)
     }
 
-    override fun getMangaUrl(manga: SManga): String = "$baseUrl/ru/manga${manga.url}"
+    override fun getMangaUrl(manga: SManga): String = "$siteUrl/ru/manga${manga.url}"
 
     override fun mangaDetailsParse(response: Response): SManga {
         checkResponse(response)
@@ -454,7 +465,7 @@ class MangaLib : RuSource() {
         val volume = chapter.url.substringAfter("volume=").substringBefore("&")
         val number = chapter.url.substringAfter("number=").substringBefore("&")
         val branch = chapter.url.substringAfter("branch_id=", "").substringBefore("&")
-        return "$baseUrl/ru/$slug/read/v$volume/c$number" + if (branch.isNotBlank()) "?bid=$branch" else ""
+        return "$siteUrl/ru/$slug/read/v$volume/c$number" + if (branch.isNotBlank()) "?bid=$branch" else ""
     }
 
     // ============================== Pages ===============================
@@ -567,6 +578,17 @@ class MangaLib : RuSource() {
     // ============================== Preferences ===============================
     override fun setupExtraPreferences(screen: PreferenceScreen) {
         val context = screen.context
+        SwitchPreferenceCompat(context).apply {
+            key = PREF_LOGIN_MODE
+            title = "Режим входа"
+            summary = "Пока включён, кнопка 🌐 открывает страницу входа MangaLib (auth.lib.social). После входа выключите."
+            setDefaultValue(false)
+            setOnPreferenceChangeListener { _, _ ->
+                lastLoginAttempt = 0L
+                true
+            }
+        }.let(screen::addPreference)
+
         EditTextPreference(context).apply {
             key = PREF_LOGIN
             title = "Логин (e-mail)"
@@ -811,7 +833,8 @@ class MangaLib : RuSource() {
         private const val PREF_OAUTH_REFRESH = "mangalib_oauth_refresh"
         private const val PREF_OAUTH_EXPIRES = "mangalib_oauth_expires"
         private const val PREF_LOGIN_DEBUG = "mangalib_login_debug"
-        private const val VERSION_LABEL = "1.4.7"
+        private const val VERSION_LABEL = "1.4.8"
+        private const val PREF_LOGIN_MODE = "mangalib_login_mode"
         private const val PREF_LOGIN = "mangalib_login"
         private const val PREF_PASSWORD = "mangalib_password"
         private const val AUTH_URL = "https://auth.lib.social"
