@@ -1,7 +1,7 @@
 {
   "name": "MangaBuff",
   "extClass": "ru.tachimanga.ext.mangabuff.MangaBuff",
-  "versionCode": 2,
+  "versionCode": 3,
   "nsfw": true,
   "sources": [{ "name": "MangaBuff", "baseUrl": "https://mangabuff.ru" }]
 }

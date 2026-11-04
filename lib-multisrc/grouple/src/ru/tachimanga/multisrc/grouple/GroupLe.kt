@@ -3,8 +3,7 @@ package ru.tachimanga.multisrc.grouple
 import androidx.preference.EditTextPreference
 import androidx.preference.PreferenceScreen
 import androidx.preference.SwitchPreferenceCompat
-import eu.kanade.tachiyomi.network.GET
-import eu.kanade.tachiyomi.network.asObservable
+import ru.tachimanga.common.GET
 import eu.kanade.tachiyomi.source.model.Filter
 import eu.kanade.tachiyomi.source.model.FilterList
 import eu.kanade.tachiyomi.source.model.MangasPage
@@ -352,7 +351,7 @@ abstract class GroupLe : RuSource() {
     }
 
     override fun fetchPageList(chapter: SChapter): Observable<List<Page>> =
-        client.newCall(pageListRequest(chapter)).asObservable().map { response ->
+        Observable.fromCallable { client.newCall(pageListRequest(chapter)).execute() }.map { response ->
             if (!response.isSuccessful) {
                 response.close()
                 if (response.code == 404) {

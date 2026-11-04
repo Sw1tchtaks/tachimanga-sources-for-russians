@@ -2,7 +2,8 @@ package ru.tachimanga.multisrc.senkuro
 
 import androidx.preference.PreferenceScreen
 import androidx.preference.SwitchPreferenceCompat
-import eu.kanade.tachiyomi.network.POST
+import ru.tachimanga.common.GET
+import ru.tachimanga.common.POST
 import eu.kanade.tachiyomi.source.model.Filter
 import eu.kanade.tachiyomi.source.model.FilterList
 import eu.kanade.tachiyomi.source.model.MangasPage
@@ -249,7 +250,7 @@ abstract class Senkuro : RuSource() {
 
     override fun imageRequest(page: Page): Request {
         val imgHeaders = headersBuilder().set("Accept", "image/avif,image/webp,image/*,*/*;q=0.8").build()
-        return eu.kanade.tachiyomi.network.GET(page.imageUrl!!, imgHeaders)
+        return GET(page.imageUrl!!, imgHeaders)
     }
 
     // ============================== Filters ==============================

@@ -1,7 +1,7 @@
 {
   "name": "Senkuro",
   "extClass": "ru.tachimanga.ext.senkuro.Senkuro",
-  "versionCode": 2,
+  "versionCode": 3,
   "nsfw": false,
   "multisrc": ["senkuro"],
   "sources": [{ "name": "Senkuro", "baseUrl": "https://senkuro.me" }]
