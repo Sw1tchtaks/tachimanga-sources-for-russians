@@ -73,7 +73,7 @@ class MangaLib : RuSource() {
 
     // While the login mode is on, the WebView button 🌐 opens the login server itself,
     // so the app shares its cookies with the extension.
-    override val baseUrl: String get() = if (loginMode) loginPageUrl() else super.baseUrl
+    override val baseUrl: String get() = if (loginMode && !loginStatus()) loginPageUrl() else super.baseUrl
 
     /**
      * The page the WebView opens in login mode: the same sign-in link the site uses.
@@ -357,6 +357,8 @@ class MangaLib : RuSource() {
 
     private val preferEnglish: Boolean get() = preferences.getString(PREF_TITLE_LANG, "rus") == "eng"
 
+    private val markAdult: Boolean get() = preferences.getBoolean(PREF_MARK_ADULT, true)
+
     // ============================== Catalog ===============================
     override fun popularMangaRequest(page: Int): Request {
         loadConstantsInBackground()
@@ -376,7 +378,7 @@ class MangaLib : RuSource() {
     private fun parsePage(response: Response): MangasPage {
         checkResponse(response)
         val root = response.tree()
-        val list = root["data"].list.mapNotNull { MangaShortDto.from(it)?.toSManga(preferEnglish) }
+        val list = root["data"].list.mapNotNull { MangaShortDto.from(it)?.toSManga(preferEnglish, markAdult) }
         return MangasPage(list, root["meta"]["has_next_page"].bool ?: false)
     }
 
@@ -438,7 +440,7 @@ class MangaLib : RuSource() {
 
     override fun mangaDetailsParse(response: Response): SManga {
         checkResponse(response)
-        return MangaDto.from(response.tree()["data"]).toSManga(preferEnglish)
+        return MangaDto.from(response.tree()["data"]).toSManga(preferEnglish, markAdult)
     }
 
     // ============================== Chapters ===============================
@@ -659,6 +661,13 @@ class MangaLib : RuSource() {
             summary = "%s\nСмените, если картинки не грузятся."
         }.let(screen::addPreference)
 
+        SwitchPreferenceCompat(context).apply {
+            key = PREF_MARK_ADULT
+            title = "Отмечать 18+ значком 🔞"
+            summary = "Перед названием взрослых тайтлов будет значок 🔞. Для тайтлов в библиотеке — после обновления."
+            setDefaultValue(true)
+        }.let(screen::addPreference)
+
         ListPreference(context).apply {
             key = PREF_TITLE_LANG
             title = "Язык названий"
@@ -707,9 +716,16 @@ class MangaLib : RuSource() {
     // Read by hand: see ru.tachimanga.common.JsonTree.
     private fun Response.tree(): JsonElement = use { json.parseToJsonElement(it.body.string()) }
 
-    private class MangaShortDto(val name: String, val rusName: String?, val engName: String?, val slugUrl: String, val cover: String?) {
-        fun toSManga(english: Boolean) = SManga.create().apply {
-            title = pickTitle(english, rusName, engName, name)
+    private class MangaShortDto(
+        val name: String,
+        val rusName: String?,
+        val engName: String?,
+        val slugUrl: String,
+        val cover: String?,
+        val adult: Boolean,
+    ) {
+        fun toSManga(english: Boolean, markAdult: Boolean) = SManga.create().apply {
+            title = (if (markAdult && adult) ADULT_MARK else "") + pickTitle(english, rusName, engName, name)
             thumbnail_url = cover
             url = "/$slugUrl"
         }
@@ -717,16 +733,16 @@ class MangaLib : RuSource() {
         companion object {
             fun from(e: JsonElement): MangaShortDto? {
                 val slug = e["slug_url"].str ?: return null
-                return MangaShortDto(e["name"].str.orEmpty(), e["rus_name"].str, e["eng_name"].str, slug, e["cover"]["default"].str)
+                return MangaShortDto(e["name"].str.orEmpty(), e["rus_name"].str, e["eng_name"].str, slug, e["cover"]["default"].str, isAdult(e))
             }
         }
     }
 
     private class MangaDto(val e: JsonElement?) {
-        fun toSManga(english: Boolean) = SManga.create().apply {
+        fun toSManga(english: Boolean, markAdult: Boolean) = SManga.create().apply {
             val rusName = e["rus_name"].str
             val engName = e["eng_name"].str
-            title = pickTitle(english, rusName, engName, e["name"].str.orEmpty())
+            title = (if (markAdult && isAdult(e)) ADULT_MARK else "") + pickTitle(english, rusName, engName, e["name"].str.orEmpty())
             thumbnail_url = e["cover"]["default"].str
             author = e["authors"].list.mapNotNull { it["name"].str }.joinToString().ifBlank { null }
             artist = e["artists"].list.mapNotNull { it["name"].str }.joinToString().ifBlank { null }
@@ -853,13 +869,21 @@ class MangaLib : RuSource() {
         )
         private const val PREF_SERVER = "mangalib_image_server"
         private const val PREF_TITLE_LANG = "mangalib_title_lang"
+        private const val PREF_MARK_ADULT = "mangalib_mark_adult"
+        private const val ADULT_MARK = "🔞 "
+
+        /** 18+ by the age label ("18+") or by its id (4 and 5 are the adult levels). */
+        private fun isAdult(e: JsonElement?): Boolean {
+            val age = e["ageRestriction"]
+            return age["label"].str?.contains("18") == true || (age["id"].int ?: 0) >= 4
+        }
         private const val PREF_SORTING = "mangalib_sorting"
         private const val PREF_PAID = "mangalib_paid_chapters"
         private const val PREF_OAUTH_ACCESS = "mangalib_oauth_access"
         private const val PREF_OAUTH_REFRESH = "mangalib_oauth_refresh"
         private const val PREF_OAUTH_EXPIRES = "mangalib_oauth_expires"
         private const val PREF_LOGIN_DEBUG = "mangalib_login_debug"
-        private const val VERSION_LABEL = "1.4.10"
+        private const val VERSION_LABEL = "1.4.11"
         private const val WEBVIEW_VERIFIER = "tachimanga-sources-for-russians-webview-login-verifier"
         private const val PREF_LOGIN_MODE = "mangalib_login_mode"
         private const val PREF_LOGIN = "mangalib_login"
