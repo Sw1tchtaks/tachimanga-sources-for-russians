@@ -1,0 +1,128 @@
+[
+  {
+    "name": "Tachiyomi: AllHentai",
+    "pkg": "ru.tachimanga.ext.allhentai",
+    "apk": "tachiyomi-ru.allhentai-v1.4.3.apk",
+    "lang": "ru",
+    "code": 3,
+    "version": "1.4.3",
+    "nsfw": 1,
+    "sources": [
+      {
+        "name": "AllHentai",
+        "lang": "ru",
+        "id": "1809051393403180443",
+        "baseUrl": "https://20.allhen.online",
+        "versionId": 1
+      }
+    ]
+  },
+  {
+    "name": "Tachiyomi: InkStory",
+    "pkg": "ru.tachimanga.ext.inkstory",
+    "apk": "tachiyomi-ru.inkstory-v1.4.4.apk",
+    "lang": "ru",
+    "code": 4,
+    "version": "1.4.4",
+    "nsfw": 0,
+    "sources": [
+      {
+        "name": "InkStory",
+        "lang": "ru",
+        "id": "2026387314200968454",
+        "baseUrl": "https://inkstory.net",
+        "versionId": 2
+      }
+    ]
+  },
+  {
+    "name": "Tachiyomi: MangaBuff",
+    "pkg": "ru.tachimanga.ext.mangabuff",
+    "apk": "tachiyomi-ru.mangabuff-v1.4.3.apk",
+    "lang": "ru",
+    "code": 3,
+    "version": "1.4.3",
+    "nsfw": 1,
+    "sources": [
+      {
+        "name": "MangaBuff",
+        "lang": "ru",
+        "id": "4008409601887986192",
+        "baseUrl": "https://mangabuff.ru",
+        "versionId": 1
+      }
+    ]
+  },
+  {
+    "name": "Tachiyomi: MangaLib",
+    "pkg": "ru.tachimanga.ext.mangalib",
+    "apk": "tachiyomi-ru.mangalib-v1.4.13.apk",
+    "lang": "ru",
+    "code": 13,
+    "version": "1.4.13",
+    "nsfw": 1,
+    "sources": [
+      {
+        "name": "MangaLib",
+        "lang": "ru",
+        "id": "6111047689498497237",
+        "baseUrl": "https://mangalib.me",
+        "versionId": 1
+      }
+    ]
+  },
+  {
+    "name": "Tachiyomi: ReadManga",
+    "pkg": "ru.tachimanga.ext.readmanga",
+    "apk": "tachiyomi-ru.readmanga-v1.4.3.apk",
+    "lang": "ru",
+    "code": 3,
+    "version": "1.4.3",
+    "nsfw": 0,
+    "sources": [
+      {
+        "name": "ReadManga",
+        "lang": "ru",
+        "id": "5",
+        "baseUrl": "https://a.zazaza.me",
+        "versionId": 1
+      }
+    ]
+  },
+  {
+    "name": "Tachiyomi: Senkognito",
+    "pkg": "ru.tachimanga.ext.senkognito",
+    "apk": "tachiyomi-ru.senkognito-v1.4.3.apk",
+    "lang": "ru",
+    "code": 3,
+    "version": "1.4.3",
+    "nsfw": 1,
+    "sources": [
+      {
+        "name": "Senkognito",
+        "lang": "ru",
+        "id": "8393977756208732343",
+        "baseUrl": "https://senkognito.com",
+        "versionId": 1
+      }
+    ]
+  },
+  {
+    "name": "Tachiyomi: Senkuro",
+    "pkg": "ru.tachimanga.ext.senkuro",
+    "apk": "tachiyomi-ru.senkuro-v1.4.3.apk",
+    "lang": "ru",
+    "code": 3,
+    "version": "1.4.3",
+    "nsfw": 0,
+    "sources": [
+      {
+        "name": "Senkuro",
+        "lang": "ru",
+        "id": "1452500215874655811",
+        "baseUrl": "https://senkuro.me",
+        "versionId": 1
+      }
+    ]
+  }
+]
