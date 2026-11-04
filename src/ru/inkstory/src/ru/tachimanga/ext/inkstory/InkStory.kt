@@ -392,7 +392,7 @@ class InkStory : RuSource() {
         val labels: List<NamedDto>? = null,
         val formats: List<String> = emptyList(),
         val relations: List<RelationDto>? = null,
-        val averageRating: Float? = null,
+        val averageRating: String? = null,
         val ratingVotesCount: Int? = null,
         val viewsCount: Int? = null,
     ) {
@@ -402,7 +402,7 @@ class InkStory : RuSource() {
             thumbnail_url = poster
             description = buildString {
                 this@BookFullDto.description?.trim()?.ifBlank { null }?.let { append(it) }
-                averageRating?.let {
+                averageRating?.toDoubleOrNull()?.let {
                     if (isNotEmpty()) append("\n\n")
                     append("Рейтинг: %.2f".format(it))
                     ratingVotesCount?.let { votes -> append(" (оценок: $votes)") }
@@ -446,15 +446,15 @@ class InkStory : RuSource() {
         val id: String,
         val name: String? = null,
         val title: String? = null,
-        val number: Double? = null,
-        val volume: Double? = null,
+        val number: String? = null,
+        val volume: String? = null,
         val branchId: String? = null,
         val createdAt: String? = null,
     ) {
         fun toSChapter(branches: Map<String, String?>, slug: String) = SChapter.create().apply {
             url = "$slug/$id"
-            val vol = volume?.let { trim(it) }
-            val num = number?.let { trim(it) }
+            val vol = volume?.toDoubleOrNull()?.let { trim(it) }
+            val num = number?.toDoubleOrNull()?.let { trim(it) }
             val base = when {
                 vol != null && num != null -> "Том $vol Глава $num"
                 num != null -> "Глава $num"
@@ -463,7 +463,7 @@ class InkStory : RuSource() {
             }
             val subtitle = listOf(this@ChapterDto.name, title).firstOrNull { !it.isNullOrBlank() }?.trim()
             name = if (subtitle != null && !base.equals(subtitle, true)) "$base — $subtitle" else base
-            chapter_number = number?.toFloat() ?: -1f
+            chapter_number = number?.toFloatOrNull() ?: -1f
             date_upload = parseIsoDate(createdAt)
             scanlator = branchId?.let { branches[it] }
         }
