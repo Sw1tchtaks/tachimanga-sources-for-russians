@@ -11,6 +11,7 @@ import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
 import kotlinx.serialization.json.JsonElement
+import okhttp3.FormBody
 import okhttp3.Headers
 import okhttp3.Interceptor
 import okhttp3.MediaType.Companion.toMediaType
@@ -19,6 +20,7 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Request
 import okhttp3.Response
+import org.jsoup.Jsoup
 import ru.tachimanga.common.CheckBoxGroup
 import ru.tachimanga.common.POST
 import ru.tachimanga.common.RuSource
@@ -94,8 +96,25 @@ class MangaLib : RuSource() {
 
     private fun Request.withToken(token: String) = newBuilder().header("Authorization", "Bearer $token").build()
 
+    override fun loginDetails(): String? {
+        if (authToken.isNotEmpty()) return "используется токен из настроек"
+        // Opening the settings also tries to log in, so the next visit shows the result.
+        if (preferences.getString(PREF_OAUTH_ACCESS, null).isNullOrEmpty()) {
+            Thread { runCatching { validAccessToken(force = true) } }.start()
+        }
+        return preferences.getString(PREF_LOGIN_DEBUG, null)
+    }
+
+    private fun debug(message: String) {
+        preferences.edit().putString(PREF_LOGIN_DEBUG, message).apply()
+    }
+
+    private fun cookieNames(url: String): List<String> = runCatching {
+        client.cookieJar.loadForRequest(url.toHttpUrl()).map { it.name }
+    }.getOrDefault(emptyList())
+
     @Synchronized
-    private fun validAccessToken(): String? {
+    private fun validAccessToken(force: Boolean = false): String? {
         val access = preferences.getString(PREF_OAUTH_ACCESS, null)
         val expires = preferences.getLong(PREF_OAUTH_EXPIRES, 0L)
         if (!access.isNullOrEmpty() && System.currentTimeMillis() < expires - 60_000) return access
@@ -106,51 +125,86 @@ class MangaLib : RuSource() {
             )?.let { return it }
         }
 
-        // Try a fresh login at most once a minute, and only if the user logged in through WebView.
-        if (System.currentTimeMillis() - lastLoginAttempt < 60_000) return null
+        // Try a fresh login at most every 20 seconds.
+        if (!force && System.currentTimeMillis() - lastLoginAttempt < 20_000) return null
         lastLoginAttempt = System.currentTimeMillis()
-        val hasAuthCookies = runCatching {
-            client.cookieJar.loadForRequest(AUTH_URL.toHttpUrl()).isNotEmpty()
-        }.getOrDefault(false)
-        if (!hasAuthCookies) return null
-        return runCatching { oauthLogin() }.getOrNull()
+        val authCookies = cookieNames(AUTH_URL)
+        if (authCookies.isEmpty()) {
+            val site = cookieNames(baseUrl)
+            debug(
+                "расширение не видит входа на auth.lib.social (cookie сайта: ${site.size}" +
+                    (if (site.isNotEmpty()) ": ${site.take(8).joinToString()}" else "") + ")",
+            )
+            return null
+        }
+        return try {
+            oauthLogin(authCookies)
+        } catch (e: Exception) {
+            debug("ошибка: ${e.message ?: e.javaClass.simpleName}")
+            null
+        }
     }
 
-    private fun oauthLogin(): String? {
+    private fun oauthLogin(authCookies: List<String>): String? {
         val random = SecureRandom()
         val verifier = ByteArray(48).also(random::nextBytes).base64Url()
         val challenge = MessageDigest.getInstance("SHA-256").digest(verifier.toByteArray()).base64Url()
         val state = ByteArray(16).also(random::nextBytes).base64Url()
         val redirectUri = "$baseUrl/ru/front/auth/oauth/callback"
 
-        var url = "$AUTH_URL/auth/oauth/authorize".toHttpUrl().newBuilder()
-            .addQueryParameter("scope", "")
-            .addQueryParameter("client_id", siteId.toString())
-            .addQueryParameter("response_type", "code")
-            .addQueryParameter("redirect_uri", redirectUri)
-            .addQueryParameter("state", state)
-            .addQueryParameter("code_challenge", challenge)
-            .addQueryParameter("code_challenge_method", "S256")
-            .build()
-            .toString()
+        var request: Request = GET(
+            "$AUTH_URL/auth/oauth/authorize".toHttpUrl().newBuilder()
+                .addQueryParameter("scope", "")
+                .addQueryParameter("client_id", siteId.toString())
+                .addQueryParameter("response_type", "code")
+                .addQueryParameter("redirect_uri", redirectUri)
+                .addQueryParameter("state", state)
+                .addQueryParameter("code_challenge", challenge)
+                .addQueryParameter("code_challenge_method", "S256")
+                .build(),
+            pageHeaders(),
+        )
 
         val noRedirect = client.newBuilder().followRedirects(false).followSslRedirects(false).build()
-        val pageHeaders = headersBuilder().set("Accept", "text/html,application/xhtml+xml,*/*;q=0.8").build()
         var code: String? = null
-        for (step in 0 until 6) {
-            val response = noRedirect.newCall(GET(url, pageHeaders)).execute()
+        var consentSubmitted = false
+        for (step in 0 until 8) {
+            val response = noRedirect.newCall(request).execute()
             val location = response.header("Location")
+            if (location.isNullOrEmpty()) {
+                // A consent page ("Разрешить доступ?"): submit its approve form, like pressing the button.
+                val html = response.body.string()
+                response.close()
+                val form = if (consentSubmitted) null else approveForm(html, response.request.url.toString())
+                if (form == null) {
+                    val hint = when {
+                        html.contains("password", true) -> "сервер просит войти заново: войдите через WebView 🌐 ещё раз"
+                        else -> "сервер вернул страницу без перенаправления (HTTP ${response.code})"
+                    }
+                    debug("$hint; cookie auth: ${authCookies.take(8).joinToString()}")
+                    return null
+                }
+                consentSubmitted = true
+                request = form
+                continue
+            }
             response.close()
-            if (location.isNullOrEmpty()) return null
-            val next = response.request.url.resolve(location) ?: return null
+            val next = response.request.url.resolve(location) ?: break
             if (next.toString().startsWith(redirectUri)) {
-                if (next.queryParameter("state") != state) return null
+                if (next.queryParameter("state") != state) {
+                    debug("сервер вернул чужой ответ (state)")
+                    return null
+                }
                 code = next.queryParameter("code")
+                if (code == null) debug("вход отклонён: ${next.queryParameter("error") ?: "без кода"}")
                 break
             }
-            url = next.toString()
+            request = GET(next, pageHeaders())
         }
-        if (code.isNullOrEmpty()) return null
+        if (code.isNullOrEmpty()) {
+            if (preferences.getString(PREF_LOGIN_DEBUG, null) == null) debug("не удалось получить код входа")
+            return null
+        }
 
         return requestToken(
             """{"grant_type":"authorization_code","client_id":$siteId,"redirect_uri":"$redirectUri",""" +
@@ -158,27 +212,60 @@ class MangaLib : RuSource() {
         )
     }
 
-    private fun requestToken(body: String): String? = runCatching {
-        val request = POST(
-            "$apiUrl/api/auth/oauth/token",
-            headersBuilder().set("Content-Type", "application/json").build(),
-            body.toRequestBody(JSON_MEDIA),
-        )
-        val response = client.newCall(request).execute()
-        if (!response.isSuccessful) {
-            response.close()
-            if (response.code in 400..499) preferences.edit().remove(PREF_OAUTH_REFRESH).apply()
-            return@runCatching null
+    private fun pageHeaders(): Headers = headersBuilder()
+        .set("Accept", "text/html,application/xhtml+xml,*/*;q=0.8")
+        .removeAll("Site-Id")
+        .build()
+
+    /** Finds the "allow" form on a consent page and builds the request that submits it. */
+    private fun approveForm(html: String, pageUrl: String): Request? {
+        val document = Jsoup.parse(html, pageUrl)
+        val form = document.select("form").firstOrNull { form ->
+            val method = form.selectFirst("input[name=_method]")?.attr("value").orEmpty()
+            form.attr("method").equals("post", true) && !method.equals("delete", true) &&
+                form.attr("action").contains("authorize")
+        } ?: return null
+        val body = FormBody.Builder().apply {
+            form.select("input[name]").forEach { add(it.attr("name"), it.attr("value")) }
+        }.build()
+        val action = form.absUrl("action").ifEmpty { pageUrl }
+        return POST(action, pageHeaders().newBuilder().set("Origin", AUTH_URL).set("Referer", pageUrl).build(), body)
+    }
+
+    private fun requestToken(body: String): String? {
+        var lastError = ""
+        for (endpoint in listOf("$apiUrl/api/auth/oauth/token", "$AUTH_URL/auth/oauth/token")) {
+            val result = runCatching {
+                val request = POST(
+                    endpoint,
+                    headersBuilder().set("Content-Type", "application/json").build(),
+                    body.toRequestBody(JSON_MEDIA),
+                )
+                val response = client.newCall(request).execute()
+                if (!response.isSuccessful) {
+                    lastError = "токен: HTTP ${response.code} (${endpoint.toHttpUrl().host})"
+                    response.close()
+                    return@runCatching null
+                }
+                val token = response.tree()
+                val access = token["access_token"].str ?: return@runCatching null
+                preferences.edit()
+                    .putString(PREF_OAUTH_ACCESS, access)
+                    .putString(PREF_OAUTH_REFRESH, token["refresh_token"].str ?: preferences.getString(PREF_OAUTH_REFRESH, ""))
+                    .putLong(PREF_OAUTH_EXPIRES, System.currentTimeMillis() + (token["expires_in"].long ?: 3600L) * 1000)
+                    .putString(PREF_LOGIN_DEBUG, "вход выполнен автоматически")
+                    .apply()
+                access
+            }.getOrElse {
+                lastError = "токен: ${it.message}"
+                null
+            }
+            if (result != null) return result
         }
-        val token = response.tree()
-        val access = token["access_token"].str ?: return@runCatching null
-        preferences.edit()
-            .putString(PREF_OAUTH_ACCESS, access)
-            .putString(PREF_OAUTH_REFRESH, token["refresh_token"].str ?: preferences.getString(PREF_OAUTH_REFRESH, ""))
-            .putLong(PREF_OAUTH_EXPIRES, System.currentTimeMillis() + (token["expires_in"].long ?: 3600L) * 1000)
-            .apply()
-        access
-    }.getOrNull()
+        if (body.contains("refresh_token")) preferences.edit().remove(PREF_OAUTH_REFRESH).apply()
+        debug(lastError)
+        return null
+    }
 
     private fun ByteArray.base64Url(): String = Base64.getUrlEncoder().withoutPadding().encodeToString(this)
 
@@ -622,6 +709,7 @@ class MangaLib : RuSource() {
         private const val PREF_OAUTH_ACCESS = "mangalib_oauth_access"
         private const val PREF_OAUTH_REFRESH = "mangalib_oauth_refresh"
         private const val PREF_OAUTH_EXPIRES = "mangalib_oauth_expires"
+        private const val PREF_LOGIN_DEBUG = "mangalib_login_debug"
         private const val AUTH_URL = "https://auth.lib.social"
         private val JSON_MEDIA = "application/json".toMediaType()
         private val ORDER_FIELDS = arrayOf("", "rate_avg", "name", "rus_name", "views", "releaseDate", "created_at", "last_chapter_at", "chap_count")
