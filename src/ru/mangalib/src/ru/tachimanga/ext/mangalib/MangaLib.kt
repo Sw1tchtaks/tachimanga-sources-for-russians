@@ -96,13 +96,20 @@ class MangaLib : RuSource() {
 
     private fun Request.withToken(token: String) = newBuilder().header("Authorization", "Bearer $token").build()
 
-    override fun loginDetails(): String? {
+    override fun loginDetails(): String {
         if (authToken.isNotEmpty()) return "используется токен из настроек"
         // Opening the settings also tries to log in, so the next visit shows the result.
         if (preferences.getString(PREF_OAUTH_ACCESS, null).isNullOrEmpty()) {
-            Thread { runCatching { validAccessToken(force = true) } }.start()
+            runCatching { Thread { runCatching { validAccessToken(force = true) } }.start() }
         }
-        return preferences.getString(PREF_LOGIN_DEBUG, null)
+        val auth = cookieNames(AUTH_URL)
+        val site = cookieNames(baseUrl)
+        val last = preferences.getString(PREF_LOGIN_DEBUG, null) ?: "попыток входа ещё не было"
+        return "версия $VERSION_LABEL; cookie auth.lib.social: ${auth.size}" +
+            (if (auth.isNotEmpty()) " (${auth.take(6).joinToString()})" else "") +
+            "; cookie mangalib.me: ${site.size}" +
+            (if (site.isNotEmpty()) " (${site.take(6).joinToString()})" else "") +
+            "; последняя попытка: $last"
     }
 
     private fun debug(message: String) {
@@ -710,6 +717,7 @@ class MangaLib : RuSource() {
         private const val PREF_OAUTH_REFRESH = "mangalib_oauth_refresh"
         private const val PREF_OAUTH_EXPIRES = "mangalib_oauth_expires"
         private const val PREF_LOGIN_DEBUG = "mangalib_login_debug"
+        private const val VERSION_LABEL = "1.4.6"
         private const val AUTH_URL = "https://auth.lib.social"
         private val JSON_MEDIA = "application/json".toMediaType()
         private val ORDER_FIELDS = arrayOf("", "rate_avg", "name", "rus_name", "views", "releaseDate", "created_at", "last_chapter_at", "chap_count")
