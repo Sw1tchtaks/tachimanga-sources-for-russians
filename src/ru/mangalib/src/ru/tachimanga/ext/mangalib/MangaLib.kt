@@ -63,6 +63,9 @@ class MangaLib : RuSource() {
 
     private val siteId = 1
 
+    @Suppress("PrivatePropertyName")
+    private val AUTH_URL: String get() = preferences.getString(PREF_AUTH_SERVER, AUTH_DEFAULT) ?: AUTH_DEFAULT
+
     private val loginMode: Boolean get() = preferences.getBoolean(PREF_LOGIN_MODE, false)
 
     /** The real site address, even while the login mode is on. */
@@ -84,7 +87,7 @@ class MangaLib : RuSource() {
 
     // ============================== Login ===============================
     // MangaLib keeps the login in a token, not in cookies. After the user logs in through
-    // WebView, the auth server (auth.lib.social) remembers them by cookie, so we can run
+    // WebView, the auth server (auth.hentaicdn.org / auth.lib.social) remembers them by cookie, so we can run
     // the same OAuth flow as the website and get our own token.
 
     @Volatile
@@ -119,7 +122,7 @@ class MangaLib : RuSource() {
         val auth = cookieNames(AUTH_URL)
         val site = cookieNames(siteUrl)
         val last = preferences.getString(PREF_LOGIN_DEBUG, null) ?: "попыток входа ещё не было"
-        return "версия $VERSION_LABEL; cookie auth.lib.social: ${auth.size}" +
+        return "версия $VERSION_LABEL; cookie ${AUTH_URL.removePrefix("https://")}: ${auth.size}" +
             (if (auth.isNotEmpty()) " (${auth.take(6).joinToString()})" else "") +
             "; cookie mangalib.me: ${site.size}" +
             (if (site.isNotEmpty()) " (${site.take(6).joinToString()})" else "") +
@@ -162,7 +165,7 @@ class MangaLib : RuSource() {
             return null
         }
         // Tachimanga shares only the site's own cookies with the extension, so the login runs
-        // in a separate cookie store that keeps the auth.lib.social session.
+        // in a separate cookie store that keeps the auth server session.
         val loginClient = if (authCookies.isNotEmpty()) client else client.newBuilder().cookieJar(MemoryCookieJar()).build()
         return try {
             oauthLogin(loginClient, login, password)
@@ -578,10 +581,23 @@ class MangaLib : RuSource() {
     // ============================== Preferences ===============================
     override fun setupExtraPreferences(screen: PreferenceScreen) {
         val context = screen.context
+        ListPreference(context).apply {
+            key = PREF_AUTH_SERVER
+            title = "Сервер входа"
+            entries = AUTH_OPTIONS.map { it.first }.toTypedArray()
+            entryValues = AUTH_OPTIONS.map { it.second }.toTypedArray()
+            setDefaultValue(AUTH_DEFAULT)
+            summary = "%s\nСмените, если страница входа не открывается."
+            setOnPreferenceChangeListener { _, _ ->
+                resetLogin()
+                true
+            }
+        }.let(screen::addPreference)
+
         SwitchPreferenceCompat(context).apply {
             key = PREF_LOGIN_MODE
             title = "Режим входа"
-            summary = "Пока включён, кнопка 🌐 открывает страницу входа MangaLib (auth.lib.social). После входа выключите."
+            summary = "Пока включён, кнопка 🌐 открывает страницу входа MangaLib (сервер входа ниже). После входа выключите."
             setDefaultValue(false)
             setOnPreferenceChangeListener { _, _ ->
                 lastLoginAttempt = 0L
@@ -833,11 +849,16 @@ class MangaLib : RuSource() {
         private const val PREF_OAUTH_REFRESH = "mangalib_oauth_refresh"
         private const val PREF_OAUTH_EXPIRES = "mangalib_oauth_expires"
         private const val PREF_LOGIN_DEBUG = "mangalib_login_debug"
-        private const val VERSION_LABEL = "1.4.8"
+        private const val VERSION_LABEL = "1.4.9"
         private const val PREF_LOGIN_MODE = "mangalib_login_mode"
         private const val PREF_LOGIN = "mangalib_login"
         private const val PREF_PASSWORD = "mangalib_password"
-        private const val AUTH_URL = "https://auth.lib.social"
+        private const val PREF_AUTH_SERVER = "mangalib_auth_server"
+        private const val AUTH_DEFAULT = "https://auth.hentaicdn.org"
+        private val AUTH_OPTIONS = listOf(
+            "auth.hentaicdn.org" to AUTH_DEFAULT,
+            "auth.lib.social" to "https://auth.lib.social",
+        )
         private val JSON_MEDIA = "application/json".toMediaType()
         private val ORDER_FIELDS = arrayOf("", "rate_avg", "name", "rus_name", "views", "releaseDate", "created_at", "last_chapter_at", "chap_count")
 
