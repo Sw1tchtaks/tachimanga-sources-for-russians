@@ -51,6 +51,8 @@ class MangaBuff : RuSource() {
 
     override fun isOwnHost(host: String): Boolean = host.endsWith("mangabuff.ru")
 
+    override val authCookieNames = listOf("remember_web_")
+
     override fun configureClient(builder: OkHttpClient.Builder): OkHttpClient.Builder =
         builder.addInterceptor(::csrfInterceptor)
 

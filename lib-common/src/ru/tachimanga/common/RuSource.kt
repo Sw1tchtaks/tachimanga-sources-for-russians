@@ -16,6 +16,8 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
 import uy.kohesive.injekt.Injekt
+import java.io.IOException
+import java.util.concurrent.TimeUnit
 import uy.kohesive.injekt.api.get
 
 /**
@@ -65,7 +67,78 @@ abstract class RuSource : HttpSource(), ConfigurableSource {
         get() = preferences.getString(PREF_TOKEN, "")?.trim()?.removePrefix("Bearer ")?.trim().orEmpty()
 
     override val client: OkHttpClient by lazy {
-        configureClient(network.cloudflareClient.newBuilder().addInterceptor(::authInterceptor)).build()
+        val builder = network.cloudflareClient.newBuilder()
+            // Tachimanga gives a source about 20 seconds to open a title, so fail fast
+            // and switch to another mirror instead of waiting.
+            .connectTimeout(8, TimeUnit.SECONDS)
+            .readTimeout(15, TimeUnit.SECONDS)
+            .addInterceptor(::mirrorFallbackInterceptor)
+            .addInterceptor(::authInterceptor)
+        configureClient(builder).build()
+    }
+
+    /**
+     * When the current mirror can't be reached, retries the request on the other mirrors
+     * and remembers the one that answered.
+     */
+    private fun mirrorFallbackInterceptor(chain: Interceptor.Chain): Response {
+        val request = chain.request()
+        val custom = preferences.getString(PREF_CUSTOM_DOMAIN, "")?.trim().orEmpty()
+        val current = baseUrl.toHttpUrlOrNull()?.host
+        if (custom.isNotEmpty() || mirrors.size < 2 || current == null || !request.url.host.endsWith(current)) {
+            return chain.proceed(request)
+        }
+        val firstError = try {
+            val response = chain.proceed(request)
+            if (response.code !in MIRROR_DOWN_CODES) return response
+            response.close()
+            IOException("HTTP ${response.code}")
+        } catch (e: IOException) {
+            e
+        }
+        for (mirror in mirrors.map { it.second }) {
+            val host = mirror.toHttpUrlOrNull()?.host ?: continue
+            if (host == current) continue
+            val newHost = request.url.host.removeSuffix(current) + host
+            val retry = request.newBuilder()
+                .url(request.url.newBuilder().host(newHost).build())
+                .header("Referer", "$mirror/")
+                .build()
+            try {
+                val response = chain.proceed(retry)
+                if (response.code in MIRROR_DOWN_CODES) {
+                    response.close()
+                    continue
+                }
+                preferences.edit().putString(PREF_DOMAIN, mirror).apply()
+                return response
+            } catch (_: IOException) {
+            }
+        }
+        throw IOException("Сайт $name не отвечает (${firstError.message}). Проверьте интернет или выберите другое зеркало в настройках.", firstError)
+    }
+
+    /**
+     * Login status shown at the top of the settings. Return null when the source has no login.
+     * By default it looks for one of [authCookieNames] in the app's saved cookies.
+     */
+    protected open fun loginStatus(): Boolean? {
+        if (authCookieNames.isEmpty() && !supportsToken) return null
+        if (manualCookies.isNotEmpty() || (supportsToken && authToken.isNotEmpty())) return true
+        return hasAuthCookie()
+    }
+
+    /** Parts of cookie names that only exist after logging in. */
+    protected open val authCookieNames: List<String> = emptyList()
+
+    protected fun hasAuthCookie(vararg extraUrls: String): Boolean = try {
+        (listOf(baseUrl) + extraUrls).mapNotNull { it.toHttpUrlOrNull() }.any { url ->
+            client.cookieJar.loadForRequest(url).any { cookie ->
+                authCookieNames.any { cookie.name.contains(it, ignoreCase = true) } && cookie.value.isNotBlank()
+            }
+        }
+    } catch (_: Exception) {
+        false
     }
 
     /** Sources add their own interceptors here. */
@@ -110,9 +183,18 @@ abstract class RuSource : HttpSource(), ConfigurableSource {
     override fun setupPreferenceScreen(screen: PreferenceScreen) {
         val context = screen.context
 
+        loginStatus()?.let { loggedIn ->
+            EditTextPreference(context).apply {
+                key = "ru_login_status"
+                title = if (loggedIn) "Статус входа: ✅ вы вошли" else "Статус входа: ❌ вход не выполнен"
+                summary = loginHelp + "\n\nСтатус обновится, когда вы снова откроете эти настройки."
+                setEnabled(false)
+            }.let(screen::addPreference)
+        }
+
         EditTextPreference(context).apply {
             key = PREF_COOKIES
-            title = "Вход в аккаунт / Cookie из браузера"
+            title = "Cookie из браузера (запасной вариант)"
             dialogTitle = "Вставьте строку Cookie (необязательно)"
             summary = cookieSummary(manualCookies.isNotEmpty())
             setDefaultValue("")
@@ -165,7 +247,9 @@ abstract class RuSource : HttpSource(), ConfigurableSource {
     /** Source-specific settings go here. */
     protected open fun setupExtraPreferences(screen: PreferenceScreen) {}
 
-    private fun cookieSummary(set: Boolean) = loginHelp + "\n\nCookie: " + if (set) "заданы" else "не заданы"
+    private fun cookieSummary(set: Boolean) =
+        (if (loginStatus() == null) loginHelp + "\n\n" else "Если вход через WebView 🌐 не сработал. ") +
+            "Cookie: " + if (set) "заданы" else "не заданы"
 
     private fun summaryOr(key: String, fallback: String): String =
         preferences.getString(key, "")?.takeIf { it.isNotBlank() } ?: fallback
@@ -181,5 +265,6 @@ abstract class RuSource : HttpSource(), ConfigurableSource {
         const val PREF_CUSTOM_DOMAIN = "ru_custom_domain"
         const val PREF_COOKIES = "ru_manual_cookies"
         const val PREF_TOKEN = "ru_auth_token"
+        private val MIRROR_DOWN_CODES = setOf(502, 503, 504, 520, 521, 522, 523, 524, 525, 526)
     }
 }

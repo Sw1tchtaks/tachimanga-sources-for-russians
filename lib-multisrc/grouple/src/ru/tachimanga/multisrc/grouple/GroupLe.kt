@@ -58,6 +58,12 @@ abstract class GroupLe : RuSource() {
 
     override fun isOwnHost(host: String): Boolean = host == authApiUrl.toHttpUrl().host
 
+    override val authCookieNames = listOf("remember_me")
+
+    override fun loginStatus(): Boolean =
+        manualCookies.isNotEmpty() || hasAuthCookie(authApiUrl) ||
+            (autoAuth && authLogin.isNotBlank() && authPass.isNotBlank())
+
     override fun configureClient(builder: OkHttpClient.Builder): OkHttpClient.Builder = builder
         .addNetworkInterceptor(::redirectInterceptor)
         .addInterceptor(::autoLoginInterceptor)

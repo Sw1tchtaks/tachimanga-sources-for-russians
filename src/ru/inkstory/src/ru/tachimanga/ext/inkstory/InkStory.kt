@@ -44,6 +44,8 @@ class InkStory : RuSource() {
 
     override val mirrors = listOf("Основной" to "https://inkstory.net")
 
+    override val authCookieNames = listOf("token", "auth")
+
     override val loginHelp: String =
         "Вход нужен только для контента 18+. Откройте источник в WebView 🌐 и войдите на сайте. " +
             "Если не получилось — вставьте Cookie из браузера или токен доступа ниже."
