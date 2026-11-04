@@ -1,0 +1,8 @@
+{
+  "name": "AllHentai",
+  "extClass": "ru.tachimanga.ext.allhentai.AllHentai",
+  "versionCode": 1,
+  "nsfw": true,
+  "multisrc": ["grouple"],
+  "sources": [{ "name": "AllHentai", "baseUrl": "https://20.allhen.online", "id": "1809051393403180443" }]
+}

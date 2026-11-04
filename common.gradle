@@ -1,0 +1,100 @@
+// Shared build logic for every extension. Each extension's build.gradle only sets `ext { ... }`
+// and applies this file. Metadata lives in ext.json next to build.gradle.
+import groovy.json.JsonSlurper
+
+apply plugin: 'com.android.application'
+apply plugin: 'kotlin-android'
+apply plugin: 'kotlinx-serialization'
+
+def meta = new JsonSlurper().parse(file('ext.json'))
+def libVersion = '1.4'
+def pkgSuffix = project.projectDir.name
+
+android {
+    namespace "ru.tachimanga.ext.${pkgSuffix}"
+    compileSdk 34
+
+    defaultConfig {
+        applicationId "ru.tachimanga.ext.${pkgSuffix}"
+        minSdk 21
+        targetSdk 34
+        versionCode meta.versionCode
+        versionName "${libVersion}.${meta.versionCode}"
+        base { archivesName = "tachiyomi-${project.projectDir.parentFile.name}.${pkgSuffix}-v${versionName}" }
+        manifestPlaceholders = [
+            appName : "Tachiyomi: ${meta.name}",
+            extClass: meta.extClass,
+            nsfw    : meta.nsfw ? 1 : 0,
+        ]
+    }
+
+    sourceSets {
+        main {
+            manifest.srcFile rootProject.file('common/AndroidManifest.xml')
+            def dirs = ['src', rootProject.file('lib-common/src')] + (meta.multisrc ?: []).collect { rootProject.file("lib-multisrc/${it}/src") }
+            java.srcDirs = dirs
+            kotlin.srcDirs = dirs
+            res.srcDirs = ['res']
+        }
+    }
+
+    // Release builds are signed with signingkey.jks. Its password is kept in the
+    // KEY_STORE_PASSWORD secret on GitHub, never in the repo. Without it, the
+    // debug key is used so local builds still work.
+    def storePass = System.getenv('KEY_STORE_PASSWORD')
+    signingConfigs {
+        if (storePass) {
+            release {
+                storeFile rootProject.file('signingkey.jks')
+                storePassword storePass
+                keyAlias System.getenv('ALIAS') ?: 'tachimanga-ru'
+                keyPassword System.getenv('KEY_PASSWORD') ?: storePass
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            signingConfig storePass ? signingConfigs.release : signingConfigs.debug
+            minifyEnabled false
+        }
+    }
+
+    dependenciesInfo {
+        includeInApk = false
+    }
+
+    buildFeatures {
+        buildConfig false
+        resValues false
+        shaders false
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+
+    kotlinOptions {
+        jvmTarget = '1.8'
+        apiVersion = '1.8'
+        languageVersion = '1.9'
+        freeCompilerArgs += ['-opt-in=kotlinx.serialization.ExperimentalSerializationApi']
+    }
+
+    lint {
+        abortOnError false
+        checkReleaseBuilds false
+    }
+}
+
+dependencies {
+    // All of these are provided by the app, so they are compileOnly.
+    compileOnly 'com.github.tachiyomiorg:extensions-lib:1.4.4'
+    compileOnly 'org.jetbrains.kotlin:kotlin-stdlib-jdk8:1.9.24'
+    compileOnly 'org.jetbrains.kotlinx:kotlinx-serialization-json:1.6.0'
+    compileOnly 'com.squareup.okhttp3:okhttp:5.0.0-alpha.11'
+    compileOnly 'org.jsoup:jsoup:1.15.3'
+    compileOnly 'io.reactivex:rxjava:1.3.8'
+    compileOnly 'com.github.null2264.injekt:injekt-core:4135455a2a'
+}
