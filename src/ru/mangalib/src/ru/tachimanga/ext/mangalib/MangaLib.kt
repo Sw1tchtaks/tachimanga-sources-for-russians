@@ -73,7 +73,18 @@ class MangaLib : RuSource() {
 
     // While the login mode is on, the WebView button 🌐 opens the login server itself,
     // so the app shares its cookies with the extension.
-    override val baseUrl: String get() = if (loginMode) AUTH_URL else super.baseUrl
+    override val baseUrl: String get() = if (loginMode) loginPageUrl() else super.baseUrl
+
+    /**
+     * The page the WebView opens in login mode: the same sign-in link the site uses.
+     * After signing in, the server sends the WebView back to mangalib.me.
+     */
+    private fun loginPageUrl(): String {
+        val challenge = MessageDigest.getInstance("SHA-256").digest(WEBVIEW_VERIFIER.toByteArray()).base64Url()
+        return "$AUTH_URL/auth/oauth/authorize?scope=&client_id=$siteId&response_type=code" +
+            "&redirect_uri=${java.net.URLEncoder.encode("$siteUrl/ru/front/auth/oauth/callback", "UTF-8")}" +
+            "&state=tachimanga&code_challenge=$challenge&code_challenge_method=S256&prompt=consent"
+    }
 
     private val apiUrl: String get() = preferences.getString(PREF_API, API_DEFAULT) ?: API_DEFAULT
 
@@ -122,10 +133,9 @@ class MangaLib : RuSource() {
         val auth = cookieNames(AUTH_URL)
         val site = cookieNames(siteUrl)
         val last = preferences.getString(PREF_LOGIN_DEBUG, null) ?: "попыток входа ещё не было"
-        return "версия $VERSION_LABEL; cookie ${AUTH_URL.removePrefix("https://")}: ${auth.size}" +
-            (if (auth.isNotEmpty()) " (${auth.take(6).joinToString()})" else "") +
-            "; cookie mangalib.me: ${site.size}" +
-            (if (site.isNotEmpty()) " (${site.take(6).joinToString()})" else "") +
+        val all = (auth + site).distinct()
+        return "версия $VERSION_LABEL; режим входа: ${if (loginMode) "включён" else "выключен"}; " +
+            "cookie: ${all.size}" + (if (all.isNotEmpty()) " (${all.take(10).joinToString()})" else "") +
             "; последняя попытка: $last"
     }
 
@@ -849,7 +859,8 @@ class MangaLib : RuSource() {
         private const val PREF_OAUTH_REFRESH = "mangalib_oauth_refresh"
         private const val PREF_OAUTH_EXPIRES = "mangalib_oauth_expires"
         private const val PREF_LOGIN_DEBUG = "mangalib_login_debug"
-        private const val VERSION_LABEL = "1.4.9"
+        private const val VERSION_LABEL = "1.4.10"
+        private const val WEBVIEW_VERIFIER = "tachimanga-sources-for-russians-webview-login-verifier"
         private const val PREF_LOGIN_MODE = "mangalib_login_mode"
         private const val PREF_LOGIN = "mangalib_login"
         private const val PREF_PASSWORD = "mangalib_password"
