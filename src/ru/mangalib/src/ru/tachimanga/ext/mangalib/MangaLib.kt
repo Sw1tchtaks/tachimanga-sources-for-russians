@@ -1,6 +1,7 @@
 package ru.tachimanga.ext.mangalib
 
 import androidx.preference.CheckBoxPreference
+import androidx.preference.EditTextPreference
 import androidx.preference.ListPreference
 import androidx.preference.PreferenceScreen
 import ru.tachimanga.common.GET
@@ -11,8 +12,11 @@ import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
 import kotlinx.serialization.json.JsonElement
+import okhttp3.Cookie
+import okhttp3.CookieJar
 import okhttp3.FormBody
 import okhttp3.Headers
+import okhttp3.HttpUrl
 import okhttp3.Interceptor
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -53,8 +57,8 @@ class MangaLib : RuSource() {
     override val mirrors = listOf("Основной" to "https://mangalib.me")
 
     override val loginHelp: String =
-        "Откройте источник в WebView 🌐 и войдите на сайте MangaLib. Потом откройте каталог: расширение само " +
-            "получит вход. Если не вышло — вставьте токен в поле «Токен доступа» ниже. Без входа доступно почти всё, кроме 18+."
+        "Введите ниже логин (e-mail) и пароль от MangaLib, затем откройте каталог: расширение войдёт само. " +
+            "Вход через Google/VK так не сработает — тогда вставьте токен в поле «Токен доступа». Без входа доступно почти всё, кроме 18+."
 
     private val siteId = 1
 
@@ -112,6 +116,11 @@ class MangaLib : RuSource() {
             "; последняя попытка: $last"
     }
 
+    private fun resetLogin() {
+        lastLoginAttempt = 0L
+        preferences.edit().remove(PREF_OAUTH_ACCESS).remove(PREF_OAUTH_REFRESH).remove(PREF_LOGIN_DEBUG).apply()
+    }
+
     private fun debug(message: String) {
         preferences.edit().putString(PREF_LOGIN_DEBUG, message).apply()
     }
@@ -135,24 +144,25 @@ class MangaLib : RuSource() {
         // Try a fresh login at most every 20 seconds.
         if (!force && System.currentTimeMillis() - lastLoginAttempt < 20_000) return null
         lastLoginAttempt = System.currentTimeMillis()
+        val login = preferences.getString(PREF_LOGIN, "").orEmpty().trim()
+        val password = preferences.getString(PREF_PASSWORD, "").orEmpty()
         val authCookies = cookieNames(AUTH_URL)
-        if (authCookies.isEmpty()) {
-            val site = cookieNames(baseUrl)
-            debug(
-                "расширение не видит входа на auth.lib.social (cookie сайта: ${site.size}" +
-                    (if (site.isNotEmpty()) ": ${site.take(8).joinToString()}" else "") + ")",
-            )
+        if (authCookies.isEmpty() && (login.isEmpty() || password.isEmpty())) {
+            debug("введите логин и пароль в настройках (вход через WebView 🌐 до расширения не доходит)")
             return null
         }
+        // Tachimanga shares only the site's own cookies with the extension, so the login runs
+        // in a separate cookie store that keeps the auth.lib.social session.
+        val loginClient = if (authCookies.isNotEmpty()) client else client.newBuilder().cookieJar(MemoryCookieJar()).build()
         return try {
-            oauthLogin(authCookies)
+            oauthLogin(loginClient, login, password)
         } catch (e: Exception) {
             debug("ошибка: ${e.message ?: e.javaClass.simpleName}")
             null
         }
     }
 
-    private fun oauthLogin(authCookies: List<String>): String? {
+    private fun oauthLogin(httpClient: OkHttpClient, login: String, password: String): String? {
         val random = SecureRandom()
         val verifier = ByteArray(48).also(random::nextBytes).base64Url()
         val challenge = MessageDigest.getInstance("SHA-256").digest(verifier.toByteArray()).base64Url()
@@ -172,23 +182,41 @@ class MangaLib : RuSource() {
             pageHeaders(),
         )
 
-        val noRedirect = client.newBuilder().followRedirects(false).followSslRedirects(false).build()
+        val noRedirect = httpClient.newBuilder().followRedirects(false).followSslRedirects(false).build()
         var code: String? = null
         var consentSubmitted = false
+        var loginSubmitted = false
         for (step in 0 until 8) {
             val response = noRedirect.newCall(request).execute()
             val location = response.header("Location")
             if (location.isNullOrEmpty()) {
-                // A consent page ("Разрешить доступ?"): submit its approve form, like pressing the button.
                 val html = response.body.string()
+                val pageUrl = response.request.url.toString()
                 response.close()
-                val form = if (consentSubmitted) null else approveForm(html, response.request.url.toString())
-                if (form == null) {
-                    val hint = when {
-                        html.contains("password", true) -> "сервер просит войти заново: войдите через WebView 🌐 ещё раз"
-                        else -> "сервер вернул страницу без перенаправления (HTTP ${response.code})"
+                val hasPasswordField = Jsoup.parse(html).selectFirst("input[type=password]") != null
+                if (hasPasswordField) {
+                    // The login page: fill in the login and password, like typing them on the site.
+                    if (loginSubmitted || login.isEmpty() || password.isEmpty()) {
+                        debug(
+                            when {
+                                !loginSubmitted -> "сервер просит войти: введите логин и пароль в настройках"
+                                html.contains("captcha", true) -> "сайт требует капчу, автоматический вход невозможен — вставьте токен"
+                                else -> "неверный логин или пароль"
+                            },
+                        )
+                        return null
                     }
-                    debug("$hint; cookie auth: ${authCookies.take(8).joinToString()}")
+                    request = loginForm(html, pageUrl, login, password) ?: run {
+                        debug("не найдена форма входа на ${response.request.url.host}")
+                        return null
+                    }
+                    loginSubmitted = true
+                    continue
+                }
+                // A consent page ("Разрешить доступ?"): submit its approve form, like pressing the button.
+                val form = if (consentSubmitted) null else approveForm(html, pageUrl)
+                if (form == null) {
+                    debug("сервер вернул страницу без перенаправления (HTTP ${response.code}, ${response.request.url.encodedPath})")
                     return null
                 }
                 consentSubmitted = true
@@ -223,6 +251,28 @@ class MangaLib : RuSource() {
         .set("Accept", "text/html,application/xhtml+xml,*/*;q=0.8")
         .removeAll("Site-Id")
         .build()
+
+    /** Fills in the login form. */
+    private fun loginForm(html: String, pageUrl: String, login: String, password: String): Request? {
+        val document = Jsoup.parse(html, pageUrl)
+        val form = document.select("form").firstOrNull { it.selectFirst("input[type=password]") != null } ?: return null
+        val body = FormBody.Builder().apply {
+            form.select("input[name]").forEach { input ->
+                val name = input.attr("name")
+                when {
+                    input.attr("type").equals("password", true) -> add(name, password)
+                    input.attr("type").equals("email", true) ||
+                        name.lowercase() in setOf("email", "login", "username", "user") -> add(name, login)
+                    input.attr("type").equals("checkbox", true) ->
+                        if (name.contains("remember", true)) add(name, input.attr("value").ifEmpty { "on" })
+                    input.attr("type").equals("submit", true) -> {}
+                    else -> add(name, input.attr("value"))
+                }
+            }
+        }.build()
+        val action = form.absUrl("action").ifEmpty { pageUrl }
+        return POST(action, pageHeaders().newBuilder().set("Origin", AUTH_URL).set("Referer", pageUrl).build(), body)
+    }
 
     /** Finds the "allow" form on a consent page and builds the request that submits it. */
     private fun approveForm(html: String, pageUrl: String): Request? {
@@ -517,6 +567,32 @@ class MangaLib : RuSource() {
     // ============================== Preferences ===============================
     override fun setupExtraPreferences(screen: PreferenceScreen) {
         val context = screen.context
+        EditTextPreference(context).apply {
+            key = PREF_LOGIN
+            title = "Логин (e-mail)"
+            dialogTitle = "E-mail или логин от MangaLib"
+            summary = preferences.getString(PREF_LOGIN, "")?.ifBlank { null } ?: "Не задан"
+            setDefaultValue("")
+            setOnPreferenceChangeListener { pref, value ->
+                pref.summary = (value as String).ifBlank { "Не задан" }
+                resetLogin()
+                true
+            }
+        }.let(screen::addPreference)
+
+        EditTextPreference(context).apply {
+            key = PREF_PASSWORD
+            title = "Пароль"
+            dialogTitle = "Пароль от MangaLib"
+            summary = if (preferences.getString(PREF_PASSWORD, "").isNullOrEmpty()) "Не задан" else "••••••"
+            setDefaultValue("")
+            setOnPreferenceChangeListener { pref, value ->
+                pref.summary = if ((value as String).isEmpty()) "Не задан" else "••••••"
+                resetLogin()
+                true
+            }
+        }.let(screen::addPreference)
+
         ListPreference(context).apply {
             key = PREF_API
             title = "Сервер API"
@@ -559,6 +635,24 @@ class MangaLib : RuSource() {
             summary = "Некупленные главы будут отмечены $$"
             setDefaultValue(false)
         }.let(screen::addPreference)
+    }
+
+    /** Cookie store kept in memory for the login run. */
+    private class MemoryCookieJar : CookieJar {
+        private val cookies = mutableListOf<Cookie>()
+
+        @Synchronized
+        override fun saveFromResponse(url: HttpUrl, cookies: List<Cookie>) {
+            cookies.forEach { new -> this.cookies.removeAll { it.name == new.name && it.domain == new.domain && it.path == new.path } }
+            this.cookies += cookies
+        }
+
+        @Synchronized
+        override fun loadForRequest(url: HttpUrl): List<Cookie> {
+            val now = System.currentTimeMillis()
+            this.cookies.removeAll { it.expiresAt < now }
+            return this.cookies.filter { it.matches(url) }
+        }
     }
 
     // ============================== JSON ===============================
@@ -717,7 +811,9 @@ class MangaLib : RuSource() {
         private const val PREF_OAUTH_REFRESH = "mangalib_oauth_refresh"
         private const val PREF_OAUTH_EXPIRES = "mangalib_oauth_expires"
         private const val PREF_LOGIN_DEBUG = "mangalib_login_debug"
-        private const val VERSION_LABEL = "1.4.6"
+        private const val VERSION_LABEL = "1.4.7"
+        private const val PREF_LOGIN = "mangalib_login"
+        private const val PREF_PASSWORD = "mangalib_password"
         private const val AUTH_URL = "https://auth.lib.social"
         private val JSON_MEDIA = "application/json".toMediaType()
         private val ORDER_FIELDS = arrayOf("", "rate_avg", "name", "rus_name", "views", "releaseDate", "created_at", "last_chapter_at", "chap_count")
