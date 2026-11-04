@@ -10,14 +10,7 @@ import eu.kanade.tachiyomi.source.model.MangasPage
 import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
-import kotlinx.serialization.SerialName
-import kotlinx.serialization.Serializable
-import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
-import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.JsonPrimitive
-import kotlinx.serialization.json.jsonArray
-import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.Headers
 import okhttp3.Interceptor
 import okhttp3.MediaType.Companion.toMediaType
@@ -31,6 +24,12 @@ import ru.tachimanga.common.POST
 import ru.tachimanga.common.RuSource
 import ru.tachimanga.common.SelectFilter
 import ru.tachimanga.common.TriStateGroup
+import ru.tachimanga.common.bool
+import ru.tachimanga.common.get
+import ru.tachimanga.common.int
+import ru.tachimanga.common.list
+import ru.tachimanga.common.long
+import ru.tachimanga.common.str
 import ru.tachimanga.common.parseIsoDate
 import java.security.MessageDigest
 import java.security.SecureRandom
@@ -171,13 +170,14 @@ class MangaLib : RuSource() {
             if (response.code in 400..499) preferences.edit().remove(PREF_OAUTH_REFRESH).apply()
             return@runCatching null
         }
-        val token = response.parseAs<OAuthTokenDto>()
+        val token = response.tree()
+        val access = token["access_token"].str ?: return@runCatching null
         preferences.edit()
-            .putString(PREF_OAUTH_ACCESS, token.accessToken)
-            .putString(PREF_OAUTH_REFRESH, token.refreshToken ?: preferences.getString(PREF_OAUTH_REFRESH, ""))
-            .putLong(PREF_OAUTH_EXPIRES, System.currentTimeMillis() + token.expiresIn * 1000)
+            .putString(PREF_OAUTH_ACCESS, access)
+            .putString(PREF_OAUTH_REFRESH, token["refresh_token"].str ?: preferences.getString(PREF_OAUTH_REFRESH, ""))
+            .putLong(PREF_OAUTH_EXPIRES, System.currentTimeMillis() + (token["expires_in"].long ?: 3600L) * 1000)
             .apply()
-        token.accessToken
+        access
     }.getOrNull()
 
     private fun ByteArray.base64Url(): String = Base64.getUrlEncoder().withoutPadding().encodeToString(this)
@@ -207,8 +207,9 @@ class MangaLib : RuSource() {
 
     private fun parsePage(response: Response): MangasPage {
         checkResponse(response)
-        val data = response.parseAs<MangasPageDto>()
-        return MangasPage(data.data.map { it.toSManga(preferEnglish) }, data.meta?.hasNextPage ?: false)
+        val root = response.tree()
+        val list = root["data"].list.mapNotNull { MangaShortDto.from(it)?.toSManga(preferEnglish) }
+        return MangasPage(list, root["meta"]["has_next_page"].bool ?: false)
     }
 
     override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request {
@@ -269,7 +270,7 @@ class MangaLib : RuSource() {
 
     override fun mangaDetailsParse(response: Response): SManga {
         checkResponse(response)
-        return response.parseAs<Data<MangaDto>>().data.toSManga(preferEnglish)
+        return MangaDto.from(response.tree()["data"]).toSManga(preferEnglish)
     }
 
     // ============================== Chapters ===============================
@@ -278,14 +279,14 @@ class MangaLib : RuSource() {
     override fun chapterListParse(response: Response): List<SChapter> {
         checkResponse(response)
         val slug = response.request.url.pathSegments.let { it[it.size - 2] }
-        val chapters = response.parseAs<Data<List<ChapterDto>>>().data
+        val chapters = response.tree()["data"].list.map(ChapterDto::from)
         if (chapters.isEmpty()) return emptyList()
         val mode = preferences.getString(PREF_SORTING, "ms_mixing")
         val showPaid = preferences.getBoolean(PREF_PAID, false)
         val defaultBranch = if (mode == "ms_mixing" && chapters.maxOf { it.branches.size } > 1) {
             runCatching {
                 client.newCall(GET("$apiUrl/api/branches/${slug.substringBefore("-")}", headers)).execute()
-                    .parseAs<Data<List<BranchIdDto>>>().data.first().id
+                    .tree()["data"].list.first()["id"].int
             }.getOrNull()
         } else {
             null
@@ -321,9 +322,10 @@ class MangaLib : RuSource() {
     override fun pageListParse(response: Response): List<Page> {
         checkResponse(response)
         val server = imageServer()
-        return response.parseAs<Data<PagesDto>>().data.pages
-            .sortedBy { it.slug }
-            .mapIndexed { index, page -> Page(index, imageUrl = server + page.url) }
+        return response.tree()["data"]["pages"].list
+            .mapNotNull { page -> page["url"].str?.let { (page["slug"].int ?: 0) to it } }
+            .sortedBy { it.first }
+            .mapIndexed { index, page -> Page(index, imageUrl = server + page.second) }
     }
 
     override fun imageUrlParse(response: Response): String = throw UnsupportedOperationException()
@@ -363,7 +365,7 @@ class MangaLib : RuSource() {
     private fun fetchConstants(): ConstantsDto {
         val url = "$apiUrl/api/constants?" + listOf("genres", "tags", "types", "scanlateStatus", "status", "format", "ageRestriction", "imageServers")
             .joinToString("&") { "fields[]=$it" }
-        return client.newCall(GET(url, headers)).execute().parseAs<Data<ConstantsDto>>().data.also { constants = it }
+        return ConstantsDto.from(client.newCall(GET(url, headers)).execute().tree()["data"]).also { constants = it }
     }
 
     private fun loadConstantsInBackground() {
@@ -385,7 +387,7 @@ class MangaLib : RuSource() {
         if (c == null) {
             filters += Filter.Header("Жанры и теги загрузятся после открытия каталога. Нажмите «Сбросить».")
         } else {
-            fun List<IdLabel>.forSite() = filter { siteId in it.siteIds }.map { it.title to it.id.toString() }
+            fun List<IdLabel>.forSite() = filter { siteId in it.siteIds }.map { it.title to it.id }
             filters += TypeFilter(c.types.forSite())
             filters += FormatFilter(c.format.forSite())
             filters += GenreFilter(c.genres.forSite())
@@ -465,173 +467,144 @@ class MangaLib : RuSource() {
         }.let(screen::addPreference)
     }
 
-    // ============================== DTOs ===============================
-    @Serializable
-    private class Data<T>(val data: T)
+    // ============================== JSON ===============================
+    // Read by hand: see ru.tachimanga.common.JsonTree.
+    private fun Response.tree(): JsonElement = use { json.parseToJsonElement(it.body.string()) }
 
-    @Serializable
-    private class MangasPageDto(val data: List<MangaShortDto> = emptyList(), val meta: Meta? = null) {
-        @Serializable
-        class Meta(@SerialName("has_next_page") val hasNextPage: Boolean = false)
-    }
-
-    @Serializable
-    private class CoverDto(val default: String? = null)
-
-    @Serializable
-    private class MangaShortDto(
-        val name: String = "",
-        @SerialName("rus_name") val rusName: String? = null,
-        @SerialName("eng_name") val engName: String? = null,
-        @SerialName("slug_url") val slugUrl: String,
-        val cover: CoverDto? = null,
-    ) {
+    private class MangaShortDto(val name: String, val rusName: String?, val engName: String?, val slugUrl: String, val cover: String?) {
         fun toSManga(english: Boolean) = SManga.create().apply {
             title = pickTitle(english, rusName, engName, name)
-            thumbnail_url = cover?.default
+            thumbnail_url = cover
             url = "/$slugUrl"
         }
-    }
 
-    @Serializable
-    private class Label(val label: String = "")
-
-    @Serializable
-    private class Named(val name: String = "")
-
-    @Serializable
-    private class MangaDto(
-        val type: Label? = null,
-        val ageRestriction: Label? = null,
-        val rating: Rating? = null,
-        val genres: List<Named> = emptyList(),
-        val tags: List<Named> = emptyList(),
-        @SerialName("rus_name") val rusName: String? = null,
-        @SerialName("eng_name") val engName: String? = null,
-        val name: String = "",
-        val cover: CoverDto? = null,
-        val authors: List<Named> = emptyList(),
-        val artists: List<Named> = emptyList(),
-        val status: Label? = null,
-        val scanlateStatus: Label? = null,
-        @SerialName("is_licensed") val isLicensed: Boolean = false,
-        val otherNames: List<String> = emptyList(),
-        val summary: JsonElement? = null,
-    ) {
-        @Serializable
-        class Rating(val average: Float = 0f, val votes: Int = 0)
-
-        fun toSManga(english: Boolean) = SManga.create().apply {
-            title = pickTitle(english, rusName, engName, name)
-            thumbnail_url = cover?.default
-            author = authors.joinToString { it.name }.ifBlank { null }
-            artist = artists.joinToString { it.name }.ifBlank { null }
-            status = parseStatus()
-            genre = (listOfNotNull(type?.label?.ifBlank { "Манга" }, ageRestriction?.label) + genres.map { it.name.trim() } + tags.map { it.name.trim() })
-                .filter { it.isNotBlank() }.joinToString()
-            description = buildString {
-                val other = if (english) rusName else engName
-                if (!other.isNullOrBlank()) append(other, "\n")
-                rating?.let { append("Рейтинг: ${it.average} (голосов: ${it.votes})\n") }
-                if (otherNames.isNotEmpty()) append("Альтернативные названия:\n", otherNames.joinToString(" / "), "\n\n")
-                append(summaryText(summary))
-            }.trim()
-        }
-
-        private fun parseStatus(): Int {
-            val t = scanlateStatus?.label.orEmpty()
-            val s = status?.label.orEmpty()
-            return when {
-                isLicensed -> SManga.LICENSED
-                (t == "Завершён" && s == "Приостановлен") || t == "Заморожен" || t == "Заброшен" -> SManga.ON_HIATUS
-                t == "Завершён" && s == "Выпуск прекращён" -> SManga.CANCELLED
-                t == "Продолжается" || t == "Выходит" -> SManga.ONGOING
-                t == "Завершён" -> SManga.COMPLETED
-                t == "Вышло" -> SManga.PUBLISHING_FINISHED
-                s == "Онгоинг" || s == "Анонс" -> SManga.ONGOING
-                s == "Завершён" -> SManga.COMPLETED
-                s == "Приостановлен" -> SManga.ON_HIATUS
-                s == "Выпуск прекращён" -> SManga.CANCELLED
-                else -> SManga.UNKNOWN
+        companion object {
+            fun from(e: JsonElement): MangaShortDto? {
+                val slug = e["slug_url"].str ?: return null
+                return MangaShortDto(e["name"].str.orEmpty(), e["rus_name"].str, e["eng_name"].str, slug, e["cover"]["default"].str)
             }
         }
     }
 
-    @Serializable
-    private class ChapterDto(
-        val id: Int = 0,
-        @SerialName("branches_count") val branchesCount: Int = 0,
-        val branches: List<Branch> = emptyList(),
-        val name: String? = null,
-        val number: String = "0",
-        val volume: String = "0",
-    ) {
-        @Serializable
-        class Branch(
-            @SerialName("branch_id") val branchId: Int? = null,
-            @SerialName("created_at") val createdAt: String? = null,
-            val teams: List<Named> = emptyList(),
-            @SerialName("restricted_view") val restrictedView: Restricted? = null,
-            val user: User? = null,
-        )
+    private class MangaDto(val e: JsonElement?) {
+        fun toSManga(english: Boolean) = SManga.create().apply {
+            val rusName = e["rus_name"].str
+            val engName = e["eng_name"].str
+            title = pickTitle(english, rusName, engName, e["name"].str.orEmpty())
+            thumbnail_url = e["cover"]["default"].str
+            author = e["authors"].list.mapNotNull { it["name"].str }.joinToString().ifBlank { null }
+            artist = e["artists"].list.mapNotNull { it["name"].str }.joinToString().ifBlank { null }
+            status = parseStatus(e["is_licensed"].bool ?: false, e["scanlateStatus"]["label"].str.orEmpty(), e["status"]["label"].str.orEmpty())
+            genre = (
+                listOfNotNull(e["type"]["label"].str?.ifBlank { "Манга" }, e["ageRestriction"]["label"].str) +
+                    e["genres"].list.mapNotNull { it["name"].str?.trim() } +
+                    e["tags"].list.mapNotNull { it["name"].str?.trim() }
+                ).filter { it.isNotBlank() }.joinToString()
+            description = buildString {
+                val other = if (english) rusName else engName
+                if (!other.isNullOrBlank()) append(other, "\n")
+                val average = e["rating"]["average"].str
+                if (average != null) append("Рейтинг: $average (голосов: ${e["rating"]["votes"].str ?: "0"})\n")
+                val otherNames = e["otherNames"].list.mapNotNull { it.str }
+                if (otherNames.isNotEmpty()) append("Альтернативные названия:\n", otherNames.joinToString(" / "), "\n\n")
+                append(summaryText(e["summary"]))
+            }.trim()
+        }
 
-        @Serializable
-        class Restricted(@SerialName("is_open") val isOpen: Boolean = true)
+        private fun parseStatus(licensed: Boolean, t: String, s: String): Int = when {
+            licensed -> SManga.LICENSED
+            (t == "Завершён" && s == "Приостановлен") || t == "Заморожен" || t == "Заброшен" -> SManga.ON_HIATUS
+            t == "Завершён" && s == "Выпуск прекращён" -> SManga.CANCELLED
+            t == "Продолжается" || t == "Выходит" -> SManga.ONGOING
+            t == "Завершён" -> SManga.COMPLETED
+            t == "Вышло" -> SManga.PUBLISHING_FINISHED
+            s == "Онгоинг" || s == "Анонс" -> SManga.ONGOING
+            s == "Завершён" -> SManga.COMPLETED
+            s == "Приостановлен" -> SManga.ON_HIATUS
+            s == "Выпуск прекращён" -> SManga.CANCELLED
+            else -> SManga.UNKNOWN
+        }
 
-        @Serializable
-        class User(val username: String = "")
+        companion object {
+            fun from(e: JsonElement?) = MangaDto(e ?: throw Exception("Тайтл не найден"))
+        }
+    }
 
+    private class Branch(val branchId: Int?, val createdAt: String?, val team: String?, val user: String?, val isOpen: Boolean)
+
+    private class ChapterDto(val branchesCount: Int, val branches: List<Branch>, val name: String?, val number: String, val volume: String) {
         fun toSChapter(slug: String, branchId: Int?, showPaid: Boolean): SChapter? {
             val branch = branches.firstOrNull { branchId == null || it.branchId == branchId } ?: branches.firstOrNull()
-            val open = branch?.restrictedView?.isOpen ?: true
+            val open = branch?.isOpen ?: true
             if (!open && !showPaid) return null
             return SChapter.create().apply {
                 val base = (if (open) "" else "$$ ") + "Том $volume. Глава $number"
                 this.name = if (this@ChapterDto.name.isNullOrBlank()) base else "$base — ${this@ChapterDto.name}"
                 val branchStr = if (branchId != null) "&branch_id=$branchId" else ""
                 url = "/$slug/chapter?$branchStr&volume=$volume&number=$number"
-                scanlator = branch?.teams?.firstOrNull()?.name ?: branch?.user?.username
+                scanlator = branch?.team ?: branch?.user
                 date_upload = parseIsoDate(branch?.createdAt)
                 chapter_number = number.toFloatOrNull() ?: -1f
             }
         }
+
+        companion object {
+            fun from(e: JsonElement) = ChapterDto(
+                branchesCount = e["branches_count"].int ?: 0,
+                branches = e["branches"].list.map { b ->
+                    Branch(
+                        branchId = b["branch_id"].int,
+                        createdAt = b["created_at"].str,
+                        team = b["teams"].list.firstOrNull()["name"].str,
+                        user = b["user"]["username"].str,
+                        isOpen = b["restricted_view"]["is_open"].bool ?: true,
+                    )
+                },
+                name = e["name"].str,
+                number = e["number"].str ?: "0",
+                volume = e["volume"].str ?: "0",
+            )
+        }
     }
 
-    @Serializable
-    private class BranchIdDto(val id: Int)
+    private class IdLabel(val id: String, val title: String, val siteIds: List<Int>)
 
-    @Serializable
-    private class OAuthTokenDto(
-        @SerialName("access_token") val accessToken: String,
-        @SerialName("refresh_token") val refreshToken: String? = null,
-        @SerialName("expires_in") val expiresIn: Long = 3600,
-    )
+    private class ImageServer(val id: String, val url: String, val siteIds: List<Int>)
 
-    @Serializable
-    private class PagesDto(val pages: List<PageDto> = emptyList())
-
-    @Serializable
-    private class PageDto(val slug: Int = 0, val url: String)
-
-    @Serializable
-    private class IdLabel(val id: Int, val label: String? = null, val name: String? = null, @SerialName("site_ids") val siteIds: List<Int> = emptyList()) {
-        val title get() = label ?: name ?: id.toString()
-    }
-
-    @Serializable
-    private class ImageServerDto(val id: String, val url: String, @SerialName("site_ids") val siteIds: List<Int> = emptyList())
-
-    @Serializable
     private class ConstantsDto(
-        val ageRestriction: List<IdLabel> = emptyList(),
-        val format: List<IdLabel> = emptyList(),
-        val genres: List<IdLabel> = emptyList(),
-        val imageServers: List<ImageServerDto> = emptyList(),
-        val scanlateStatus: List<IdLabel> = emptyList(),
-        val status: List<IdLabel> = emptyList(),
-        val tags: List<IdLabel> = emptyList(),
-        val types: List<IdLabel> = emptyList(),
-    )
+        val ageRestriction: List<IdLabel>,
+        val format: List<IdLabel>,
+        val genres: List<IdLabel>,
+        val imageServers: List<ImageServer>,
+        val scanlateStatus: List<IdLabel>,
+        val status: List<IdLabel>,
+        val tags: List<IdLabel>,
+        val types: List<IdLabel>,
+    ) {
+        companion object {
+            private fun sites(e: JsonElement?) = e["site_ids"].list.mapNotNull { it.int }
+
+            private fun labels(e: JsonElement?) = e.list.mapNotNull { item ->
+                val id = item["id"].str ?: return@mapNotNull null
+                IdLabel(id, item["label"].str ?: item["name"].str ?: id, sites(item))
+            }
+
+            fun from(e: JsonElement?) = ConstantsDto(
+                ageRestriction = labels(e["ageRestriction"]),
+                format = labels(e["format"]),
+                genres = labels(e["genres"]),
+                imageServers = e["imageServers"].list.mapNotNull { item ->
+                    val id = item["id"].str
+                    val url = item["url"].str
+                    if (id == null || url == null) null else ImageServer(id, url, sites(item))
+                },
+                scanlateStatus = labels(e["scanlateStatus"]),
+                status = labels(e["status"]),
+                tags = labels(e["tags"]),
+                types = labels(e["types"]),
+            )
+        }
+    }
 
     companion object {
         private const val PREF_API = "mangalib_api"
@@ -659,25 +632,23 @@ class MangaLib : RuSource() {
             else -> name
         }
 
-        private fun summaryText(node: JsonElement?): String = try {
-            buildString { node?.let { collectText(it, this) } }
-        } catch (_: Exception) {
-            node?.toString().orEmpty()
-        }
+        private fun summaryText(node: JsonElement?): String = buildString { collectText(node, this) }
 
-        private fun collectText(node: JsonElement, out: StringBuilder) {
-            when (node) {
-                is JsonObject -> when (node["type"]?.jsonPrimitive?.content) {
-                    "text" -> node["text"]?.jsonPrimitive?.content?.let { out.append(it) }
-                    "hardBreak" -> out.append("\n")
-                    "paragraph" -> {
-                        node["content"]?.jsonArray?.forEach { collectText(it, out) }
-                        out.append("\n")
-                    }
-                    else -> node["content"]?.jsonArray?.forEach { collectText(it, out) }
+        private fun collectText(node: JsonElement?, out: StringBuilder) {
+            if (node == null) return
+            node.str?.let {
+                out.append(it)
+                return
+            }
+            when (node["type"].str) {
+                "text" -> node["text"].str?.let { out.append(it) }
+                "hardBreak" -> out.append("\n")
+                "paragraph" -> {
+                    node["content"].list.forEach { collectText(it, out) }
+                    out.append("\n")
                 }
-                is JsonArray -> node.forEach { collectText(it, out) }
-                is JsonPrimitive -> out.append(node.content)
+                null -> node.list.forEach { collectText(it, out) }
+                else -> node["content"].list.forEach { collectText(it, out) }
             }
         }
     }
