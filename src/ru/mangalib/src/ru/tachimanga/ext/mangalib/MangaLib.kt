@@ -19,14 +19,22 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonPrimitive
 import okhttp3.Headers
+import okhttp3.Interceptor
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.OkHttpClient
+import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Request
 import okhttp3.Response
 import ru.tachimanga.common.CheckBoxGroup
+import ru.tachimanga.common.POST
 import ru.tachimanga.common.RuSource
 import ru.tachimanga.common.SelectFilter
 import ru.tachimanga.common.TriStateGroup
 import ru.tachimanga.common.parseIsoDate
+import java.security.MessageDigest
+import java.security.SecureRandom
+import java.util.Base64
 
 /**
  * MangaLib (LibSocial API). Manga url = "/<slug_url>". Chapter url = "/<slug_url>/chapter?...".
@@ -44,14 +52,135 @@ class MangaLib : RuSource() {
     override val mirrors = listOf("Основной" to "https://mangalib.me")
 
     override val loginHelp: String =
-        "Почти все тайтлы читаются без входа. Вход нужен для 18+ и платных глав. " +
-            "MangaLib хранит вход не в Cookie, а в токене: вставьте его в поле «Токен доступа» ниже."
+        "Откройте источник в WebView 🌐 и войдите на сайте MangaLib. Потом откройте каталог: расширение само " +
+            "получит вход. Если не вышло — вставьте токен в поле «Токен доступа» ниже. Без входа доступно почти всё, кроме 18+."
 
     private val siteId = 1
 
     private val apiUrl: String get() = preferences.getString(PREF_API, API_DEFAULT) ?: API_DEFAULT
 
     override fun isOwnHost(host: String): Boolean = host == apiUrl.toHttpUrl().host
+
+    override fun configureClient(builder: OkHttpClient.Builder): OkHttpClient.Builder =
+        builder.addInterceptor(::oauthInterceptor)
+
+    override fun loginStatus(): Boolean =
+        authToken.isNotEmpty() || !preferences.getString(PREF_OAUTH_ACCESS, null).isNullOrEmpty()
+
+    // ============================== Login ===============================
+    // MangaLib keeps the login in a token, not in cookies. After the user logs in through
+    // WebView, the auth server (auth.lib.social) remembers them by cookie, so we can run
+    // the same OAuth flow as the website and get our own token.
+
+    @Volatile
+    private var lastLoginAttempt = 0L
+
+    private fun oauthInterceptor(chain: Interceptor.Chain): Response {
+        val request = chain.request()
+        if (request.url.host != apiUrl.toHttpUrl().host || request.header("Authorization") != null ||
+            request.url.encodedPath.contains("/auth/oauth/")
+        ) {
+            return chain.proceed(request)
+        }
+        val token = validAccessToken()
+        val response = chain.proceed(if (token != null) request.withToken(token) else request)
+        if (response.code == 401 && token != null) {
+            response.close()
+            preferences.edit().remove(PREF_OAUTH_ACCESS).apply()
+            val fresh = validAccessToken()
+            return chain.proceed(if (fresh != null) request.withToken(fresh) else request)
+        }
+        return response
+    }
+
+    private fun Request.withToken(token: String) = newBuilder().header("Authorization", "Bearer $token").build()
+
+    @Synchronized
+    private fun validAccessToken(): String? {
+        val access = preferences.getString(PREF_OAUTH_ACCESS, null)
+        val expires = preferences.getLong(PREF_OAUTH_EXPIRES, 0L)
+        if (!access.isNullOrEmpty() && System.currentTimeMillis() < expires - 60_000) return access
+
+        preferences.getString(PREF_OAUTH_REFRESH, null)?.takeIf { it.isNotEmpty() }?.let { refresh ->
+            requestToken(
+                """{"grant_type":"refresh_token","client_id":$siteId,"refresh_token":"$refresh","scope":""}""",
+            )?.let { return it }
+        }
+
+        // Try a fresh login at most once a minute, and only if the user logged in through WebView.
+        if (System.currentTimeMillis() - lastLoginAttempt < 60_000) return null
+        lastLoginAttempt = System.currentTimeMillis()
+        val hasAuthCookies = runCatching {
+            client.cookieJar.loadForRequest(AUTH_URL.toHttpUrl()).isNotEmpty()
+        }.getOrDefault(false)
+        if (!hasAuthCookies) return null
+        return runCatching { oauthLogin() }.getOrNull()
+    }
+
+    private fun oauthLogin(): String? {
+        val random = SecureRandom()
+        val verifier = ByteArray(48).also(random::nextBytes).base64Url()
+        val challenge = MessageDigest.getInstance("SHA-256").digest(verifier.toByteArray()).base64Url()
+        val state = ByteArray(16).also(random::nextBytes).base64Url()
+        val redirectUri = "$baseUrl/ru/front/auth/oauth/callback"
+
+        var url = "$AUTH_URL/auth/oauth/authorize".toHttpUrl().newBuilder()
+            .addQueryParameter("scope", "")
+            .addQueryParameter("client_id", siteId.toString())
+            .addQueryParameter("response_type", "code")
+            .addQueryParameter("redirect_uri", redirectUri)
+            .addQueryParameter("state", state)
+            .addQueryParameter("code_challenge", challenge)
+            .addQueryParameter("code_challenge_method", "S256")
+            .build()
+            .toString()
+
+        val noRedirect = client.newBuilder().followRedirects(false).followSslRedirects(false).build()
+        val pageHeaders = headersBuilder().set("Accept", "text/html,application/xhtml+xml,*/*;q=0.8").build()
+        var code: String? = null
+        for (step in 0 until 6) {
+            val response = noRedirect.newCall(GET(url, pageHeaders)).execute()
+            val location = response.header("Location")
+            response.close()
+            if (location.isNullOrEmpty()) return null
+            val next = response.request.url.resolve(location) ?: return null
+            if (next.toString().startsWith(redirectUri)) {
+                if (next.queryParameter("state") != state) return null
+                code = next.queryParameter("code")
+                break
+            }
+            url = next.toString()
+        }
+        if (code.isNullOrEmpty()) return null
+
+        return requestToken(
+            """{"grant_type":"authorization_code","client_id":$siteId,"redirect_uri":"$redirectUri",""" +
+                """"code_verifier":"$verifier","code":"$code"}""",
+        )
+    }
+
+    private fun requestToken(body: String): String? = runCatching {
+        val request = POST(
+            "$apiUrl/api/auth/oauth/token",
+            headersBuilder().set("Content-Type", "application/json").build(),
+            body.toRequestBody(JSON_MEDIA),
+        )
+        val response = client.newCall(request).execute()
+        if (!response.isSuccessful) {
+            response.close()
+            if (response.code in 400..499) preferences.edit().remove(PREF_OAUTH_REFRESH).apply()
+            return@runCatching null
+        }
+        val token = response.parseAs<OAuthTokenDto>()
+        preferences.edit()
+            .putString(PREF_OAUTH_ACCESS, token.accessToken)
+            .putString(PREF_OAUTH_REFRESH, token.refreshToken ?: preferences.getString(PREF_OAUTH_REFRESH, ""))
+            .putLong(PREF_OAUTH_EXPIRES, System.currentTimeMillis() + token.expiresIn * 1000)
+            .apply()
+        token.accessToken
+    }.getOrNull()
+
+    private fun ByteArray.base64Url(): String = Base64.getUrlEncoder().withoutPadding().encodeToString(this)
 
     override fun headersBuilder(): Headers.Builder = super.headersBuilder()
         .set("Accept", "application/json, text/plain, */*")
@@ -472,6 +601,13 @@ class MangaLib : RuSource() {
     private class BranchIdDto(val id: Int)
 
     @Serializable
+    private class OAuthTokenDto(
+        @SerialName("access_token") val accessToken: String,
+        @SerialName("refresh_token") val refreshToken: String? = null,
+        @SerialName("expires_in") val expiresIn: Long = 3600,
+    )
+
+    @Serializable
     private class PagesDto(val pages: List<PageDto> = emptyList())
 
     @Serializable
@@ -510,6 +646,11 @@ class MangaLib : RuSource() {
         private const val PREF_TITLE_LANG = "mangalib_title_lang"
         private const val PREF_SORTING = "mangalib_sorting"
         private const val PREF_PAID = "mangalib_paid_chapters"
+        private const val PREF_OAUTH_ACCESS = "mangalib_oauth_access"
+        private const val PREF_OAUTH_REFRESH = "mangalib_oauth_refresh"
+        private const val PREF_OAUTH_EXPIRES = "mangalib_oauth_expires"
+        private const val AUTH_URL = "https://auth.lib.social"
+        private val JSON_MEDIA = "application/json".toMediaType()
         private val ORDER_FIELDS = arrayOf("", "rate_avg", "name", "rus_name", "views", "releaseDate", "created_at", "last_chapter_at", "chap_count")
 
         private fun pickTitle(english: Boolean, rus: String?, eng: String?, name: String): String = when {
