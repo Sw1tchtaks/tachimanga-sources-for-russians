@@ -1,7 +1,7 @@
 {
   "name": "ReadManga",
   "extClass": "ru.tachimanga.ext.readmanga.ReadManga",
-  "versionCode": 2,
+  "versionCode": 3,
   "nsfw": false,
   "multisrc": ["grouple"],
   "sources": [{ "name": "ReadManga", "baseUrl": "https://a.zazaza.me", "id": "5" }]
