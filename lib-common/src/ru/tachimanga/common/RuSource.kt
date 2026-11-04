@@ -128,6 +128,9 @@ abstract class RuSource : HttpSource(), ConfigurableSource {
         return hasAuthCookie()
     }
 
+    /** Extra text under the login status, for example why the login failed. */
+    protected open fun loginDetails(): String? = null
+
     /** Parts of cookie names that only exist after logging in. */
     protected open val authCookieNames: List<String> = emptyList()
 
@@ -187,7 +190,8 @@ abstract class RuSource : HttpSource(), ConfigurableSource {
             EditTextPreference(context).apply {
                 key = "ru_login_status"
                 title = if (loggedIn) "Статус входа: ✅ вы вошли" else "Статус входа: ❌ вход не выполнен"
-                summary = loginHelp + "\n\nСтатус обновится, когда вы снова откроете эти настройки."
+                summary = loginHelp + "\n\nСтатус обновится, когда вы снова откроете эти настройки." +
+                    (loginDetails()?.let { "\n\nПодробности: $it" } ?: "")
                 setEnabled(false)
             }.let(screen::addPreference)
         }
