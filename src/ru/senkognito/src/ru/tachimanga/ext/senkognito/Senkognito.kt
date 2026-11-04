@@ -6,7 +6,7 @@ class Senkognito : Senkuro() {
     override val name = "Senkognito"
     override val appId = "5033164800100"
     override val mirrors = listOf(
-        "Основной" to "https://senkognito.com",
         "Россия" to "https://senkuro.me",
+        "Основной" to "https://senkognito.com",
     )
 }

@@ -21,7 +21,6 @@ import kotlinx.serialization.json.put
 import kotlinx.serialization.serializer
 import okhttp3.Headers
 import okhttp3.MediaType.Companion.toMediaType
-import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
@@ -29,6 +28,12 @@ import ru.tachimanga.common.RuSource
 import ru.tachimanga.common.TriStateGroup
 import ru.tachimanga.common.capitalizeRu
 import ru.tachimanga.common.parseIsoDate
+import rx.Observable
+import java.util.concurrent.Callable
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ExecutionException
+import java.util.concurrent.Executors
+import java.util.concurrent.Future
 import java.util.concurrent.TimeUnit
 
 /**
@@ -51,10 +56,6 @@ abstract class Senkuro : RuSource() {
         get() = baseUrl.replace("https://", "https://api.") + "/graphql"
 
     override fun isOwnHost(host: String): Boolean = host.startsWith("api.senk")
-
-    override fun configureClient(builder: OkHttpClient.Builder): OkHttpClient.Builder = builder
-        .connectTimeout(30, TimeUnit.SECONDS)
-        .readTimeout(60, TimeUnit.SECONDS)
 
     override fun headersBuilder(): Headers.Builder = super.headersBuilder()
         .set("User-Agent", "Tachiyomi (+https://github.com/Sw1tchtaks/tachimanga-sources-for-russians)")
@@ -158,6 +159,36 @@ abstract class Senkuro : RuSource() {
 
     override fun mangaDetailsRequest(manga: SManga): Request =
         graphQL("fetchTachiyomiManga", DETAILS_QUERY, FetchTachiyomiMangaVariables(mangaId(manga)))
+
+    // Tachimanga loads the description and the chapters one after another and gives up
+    // after ~20 s. Start loading the chapters together with the description to save time.
+    private val executor = Executors.newCachedThreadPool()
+    private val chapterPrefetch = ConcurrentHashMap<String, Pair<Long, Future<List<SChapter>>>>()
+
+    override fun fetchMangaDetails(manga: SManga): Observable<SManga> {
+        chapterPrefetch[manga.url] = System.currentTimeMillis() to executor.submit(Callable { loadChapters(manga) })
+        return super.fetchMangaDetails(manga)
+    }
+
+    override fun fetchChapterList(manga: SManga): Observable<List<SChapter>> = Observable.fromCallable {
+        val cached = chapterPrefetch.remove(manga.url)
+            ?.takeIf { System.currentTimeMillis() - it.first < PREFETCH_TTL_MS }
+            ?.second
+        try {
+            cached?.get(25, TimeUnit.SECONDS) ?: loadChapters(manga)
+        } catch (e: ExecutionException) {
+            throw e.cause ?: e
+        }
+    }
+
+    private fun loadChapters(manga: SManga): List<SChapter> {
+        val response = client.newCall(chapterListRequest(manga)).execute()
+        if (!response.isSuccessful) {
+            response.close()
+            throw Exception("Senkuro: ошибка ${response.code} при загрузке глав")
+        }
+        return chapterListParse(response)
+    }
 
     override fun mangaDetailsParse(response: Response): SManga =
         response.parseGraphQL<TachiyomiMangaInfoResponseDto>().mangaTachiyomiInfo?.toSManga(preferEnglish)
@@ -315,6 +346,7 @@ abstract class Senkuro : RuSource() {
 
     companion object {
         private const val OFFSET_COUNT = 10
+        private const val PREFETCH_TTL_MS = 60_000L
         private const val PREF_ENGLISH = "senkuro_english_titles"
         private val ORDER_FIELDS = arrayOf("SCORE", "POPULARITY_SCORE")
     }
