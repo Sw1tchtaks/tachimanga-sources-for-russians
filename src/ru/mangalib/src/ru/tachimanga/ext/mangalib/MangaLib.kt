@@ -359,11 +359,14 @@ class MangaLib : RuSource() {
 
     private val markAdult: Boolean get() = preferences.getBoolean(PREF_MARK_ADULT, true)
 
+    private val hideLicensed: Boolean get() = preferences.getBoolean(PREF_HIDE_LICENSED, false)
+
     // ============================== Catalog ===============================
     override fun popularMangaRequest(page: Int): Request {
         loadConstantsInBackground()
         val url = "$apiUrl/api/manga".toHttpUrl().newBuilder()
             .addQueryParameter("site_id[]", siteId.toString())
+            .apply { if (hideLicensed) addQueryParameter("fields[]", "is_licensed") }
             .addQueryParameter("page", page.toString())
             .build()
         return GET(url, headers)
@@ -371,14 +374,17 @@ class MangaLib : RuSource() {
 
     override fun popularMangaParse(response: Response): MangasPage = parsePage(response)
 
-    override fun latestUpdatesRequest(page: Int): Request = GET("$apiUrl/api/latest-updates?page=$page", headers)
+    override fun latestUpdatesRequest(page: Int): Request =
+        GET("$apiUrl/api/latest-updates?page=$page" + if (hideLicensed) "&fields[]=is_licensed" else "", headers)
 
     override fun latestUpdatesParse(response: Response): MangasPage = parsePage(response)
 
     private fun parsePage(response: Response): MangasPage {
         checkResponse(response)
         val root = response.tree()
-        val list = root["data"].list.mapNotNull { MangaShortDto.from(it)?.toSManga(preferEnglish, markAdult) }
+        val list = root["data"].list
+            .filter { !hideLicensed || it["is_licensed"].bool != true }
+            .mapNotNull { MangaShortDto.from(it)?.toSManga(preferEnglish, markAdult) }
         return MangasPage(list, root["meta"]["has_next_page"].bool ?: false)
     }
 
@@ -387,6 +393,7 @@ class MangaLib : RuSource() {
         val url = "$apiUrl/api/manga".toHttpUrl().newBuilder()
         url.addQueryParameter("page", page.toString())
         url.addQueryParameter("site_id[]", siteId.toString())
+        if (hideLicensed) url.addQueryParameter("fields[]", "is_licensed")
         query.trim().takeIf { it.isNotEmpty() }?.let { url.addQueryParameter("q", it) }
         filters.forEach { filter ->
             when (filter) {
@@ -662,6 +669,13 @@ class MangaLib : RuSource() {
         }.let(screen::addPreference)
 
         SwitchPreferenceCompat(context).apply {
+            key = PREF_HIDE_LICENSED
+            title = "Скрывать лицензированные"
+            summary = "Не показывать в каталоге тайтлы, которые убраны с сайта по лицензии. Если каталог перестанет грузиться, выключите."
+            setDefaultValue(false)
+        }.let(screen::addPreference)
+
+        SwitchPreferenceCompat(context).apply {
             key = PREF_MARK_ADULT
             title = "Отмечать 18+ значком 🔞"
             summary = "Перед названием взрослых тайтлов будет значок 🔞. Для тайтлов в библиотеке — после обновления."
@@ -870,6 +884,7 @@ class MangaLib : RuSource() {
         private const val PREF_SERVER = "mangalib_image_server"
         private const val PREF_TITLE_LANG = "mangalib_title_lang"
         private const val PREF_MARK_ADULT = "mangalib_mark_adult"
+        private const val PREF_HIDE_LICENSED = "mangalib_hide_licensed"
         private const val ADULT_MARK = "🔞 "
 
         /** 18+ by the age label ("18+") or by its id (4 and 5 are the adult levels). */
@@ -883,7 +898,7 @@ class MangaLib : RuSource() {
         private const val PREF_OAUTH_REFRESH = "mangalib_oauth_refresh"
         private const val PREF_OAUTH_EXPIRES = "mangalib_oauth_expires"
         private const val PREF_LOGIN_DEBUG = "mangalib_login_debug"
-        private const val VERSION_LABEL = "1.4.11"
+        private const val VERSION_LABEL = "1.4.12"
         private const val WEBVIEW_VERIFIER = "tachimanga-sources-for-russians-webview-login-verifier"
         private const val PREF_LOGIN_MODE = "mangalib_login_mode"
         private const val PREF_LOGIN = "mangalib_login"

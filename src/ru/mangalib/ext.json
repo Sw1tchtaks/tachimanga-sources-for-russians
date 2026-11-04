@@ -1,7 +1,7 @@
 {
   "name": "MangaLib",
   "extClass": "ru.tachimanga.ext.mangalib.MangaLib",
-  "versionCode": 11,
+  "versionCode": 12,
   "nsfw": true,
   "sources": [{ "name": "MangaLib", "baseUrl": "https://mangalib.me" }]
 }
