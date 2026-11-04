@@ -1,0 +1,8 @@
+{
+  "name": "Senkognito",
+  "extClass": "ru.tachimanga.ext.senkognito.Senkognito",
+  "versionCode": 1,
+  "nsfw": true,
+  "multisrc": ["senkuro"],
+  "sources": [{ "name": "Senkognito", "baseUrl": "https://senkognito.com" }]
+}

@@ -1,0 +1,7 @@
+{
+  "name": "InkStory",
+  "extClass": "ru.tachimanga.ext.inkstory.InkStory",
+  "versionCode": 1,
+  "nsfw": false,
+  "sources": [{ "name": "InkStory", "baseUrl": "https://inkstory.net", "versionId": 2 }]
+}

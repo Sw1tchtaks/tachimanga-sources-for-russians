@@ -1,0 +1,10 @@
+Tachimanga Sources for Russians
+Copyright 2026 Sw1tchtaks
+
+Parts of the source code (Senkuro, Senkognito, ReadManga, AllHentai, MangaBuff,
+InkStory) are adapted from keiyoushi/extensions-source
+(https://github.com/keiyoushi/extensions-source), licensed under the
+Apache License 2.0.
+
+Site logic, mirrors and settings are also based on
+Sw1tchtaks/aidoku-sources-for-russians and its fork by redcatpet.

@@ -1,0 +1,8 @@
+{
+  "name": "ReadManga",
+  "extClass": "ru.tachimanga.ext.readmanga.ReadManga",
+  "versionCode": 1,
+  "nsfw": false,
+  "multisrc": ["grouple"],
+  "sources": [{ "name": "ReadManga", "baseUrl": "https://a.zazaza.me", "id": "5" }]
+}
