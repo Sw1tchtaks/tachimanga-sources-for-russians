@@ -361,12 +361,65 @@ class MangaLib : RuSource() {
 
     private val hideLicensed: Boolean get() = preferences.getBoolean(PREF_HIDE_LICENSED, false)
 
+    // The catalog list doesn't say whether a title is licensed, so titles are checked one by one
+    // in the background. Results are remembered: licensed ones are hidden from the next load on.
+    private val licensed: MutableSet<String> by lazy {
+        java.util.Collections.synchronizedSet(
+            preferences.getString(PREF_LICENSED, "").orEmpty().split('\n').filter { it.isNotBlank() }.toMutableSet(),
+        )
+    }
+    private val notLicensed: MutableSet<String> by lazy {
+        java.util.Collections.synchronizedSet(
+            preferences.getString(PREF_NOT_LICENSED, "").orEmpty().split('\n').filter { it.isNotBlank() }.toMutableSet(),
+        )
+    }
+    private val licenseQueue = java.util.concurrent.LinkedBlockingDeque<String>()
+    private val licenseQueued = java.util.Collections.synchronizedSet(HashSet<String>())
+
+    @Volatile
+    private var licenseWorker: Thread? = null
+
+    private fun checkLicensesInBackground(slugs: List<String>) {
+        slugs.filter { it !in licensed && it !in notLicensed && licenseQueued.add(it) }.forEach(licenseQueue::add)
+        if (licenseWorker?.isAlive == true || licenseQueue.isEmpty()) return
+        licenseWorker = Thread {
+            while (true) {
+                val slug = licenseQueue.poll() ?: break
+                runCatching {
+                    val response = client.newCall(GET("$apiUrl/api/manga/$slug", headers)).execute()
+                    if (response.code == 429) {
+                        response.close()
+                        licenseQueue.addFirst(slug)
+                        Thread.sleep(5_000)
+                        return@runCatching
+                    }
+                    if (!response.isSuccessful) {
+                        response.close()
+                        return@runCatching
+                    }
+                    val isLicensed = response.tree()["data"]["is_licensed"].bool == true
+                    (if (isLicensed) licensed else notLicensed).add(slug)
+                    saveLicenseCache()
+                }
+                Thread.sleep(700)
+            }
+        }.apply { isDaemon = true; start() }
+    }
+
+    private fun saveLicenseCache() {
+        val yes = synchronized(licensed) { licensed.toList() }
+        val no = synchronized(notLicensed) { notLicensed.toList().takeLast(5000) }
+        preferences.edit()
+            .putString(PREF_LICENSED, yes.joinToString("\n"))
+            .putString(PREF_NOT_LICENSED, no.joinToString("\n"))
+            .apply()
+    }
+
     // ============================== Catalog ===============================
     override fun popularMangaRequest(page: Int): Request {
         loadConstantsInBackground()
         val url = "$apiUrl/api/manga".toHttpUrl().newBuilder()
             .addQueryParameter("site_id[]", siteId.toString())
-            .apply { if (hideLicensed) addQueryParameter("fields[]", "is_licensed") }
             .addQueryParameter("page", page.toString())
             .build()
         return GET(url, headers)
@@ -375,15 +428,17 @@ class MangaLib : RuSource() {
     override fun popularMangaParse(response: Response): MangasPage = parsePage(response)
 
     override fun latestUpdatesRequest(page: Int): Request =
-        GET("$apiUrl/api/latest-updates?page=$page" + if (hideLicensed) "&fields[]=is_licensed" else "", headers)
+        GET("$apiUrl/api/latest-updates?page=$page", headers)
 
     override fun latestUpdatesParse(response: Response): MangasPage = parsePage(response)
 
     private fun parsePage(response: Response): MangasPage {
         checkResponse(response)
         val root = response.tree()
-        val list = root["data"].list
-            .filter { !hideLicensed || it["is_licensed"].bool != true }
+        val items = root["data"].list
+        if (hideLicensed) checkLicensesInBackground(items.mapNotNull { it["slug_url"].str })
+        val list = items
+            .filter { !hideLicensed || (it["is_licensed"].bool != true && it["slug_url"].str !in licensed) }
             .mapNotNull { MangaShortDto.from(it)?.toSManga(preferEnglish, markAdult) }
         return MangasPage(list, root["meta"]["has_next_page"].bool ?: false)
     }
@@ -393,7 +448,6 @@ class MangaLib : RuSource() {
         val url = "$apiUrl/api/manga".toHttpUrl().newBuilder()
         url.addQueryParameter("page", page.toString())
         url.addQueryParameter("site_id[]", siteId.toString())
-        if (hideLicensed) url.addQueryParameter("fields[]", "is_licensed")
         query.trim().takeIf { it.isNotEmpty() }?.let { url.addQueryParameter("q", it) }
         filters.forEach { filter ->
             when (filter) {
@@ -447,7 +501,14 @@ class MangaLib : RuSource() {
 
     override fun mangaDetailsParse(response: Response): SManga {
         checkResponse(response)
-        return MangaDto.from(response.tree()["data"]).toSManga(preferEnglish, markAdult)
+        val data = response.tree()["data"]
+        if (data["is_licensed"].bool == true) {
+            data["slug_url"].str?.let { slug ->
+                licensed.add(slug)
+                saveLicenseCache()
+            }
+        }
+        return MangaDto.from(data).toSManga(preferEnglish, markAdult)
     }
 
     // ============================== Chapters ===============================
@@ -671,7 +732,8 @@ class MangaLib : RuSource() {
         SwitchPreferenceCompat(context).apply {
             key = PREF_HIDE_LICENSED
             title = "Скрывать лицензированные"
-            summary = "Не показывать в каталоге тайтлы, которые убраны с сайта по лицензии. Если каталог перестанет грузиться, выключите."
+            summary = "Не показывать тайтлы, убранные с сайта по лицензии. Тайтлы проверяются в фоне, поэтому скрываются " +
+                "со следующего открытия каталога."
             setDefaultValue(false)
         }.let(screen::addPreference)
 
@@ -885,6 +947,8 @@ class MangaLib : RuSource() {
         private const val PREF_TITLE_LANG = "mangalib_title_lang"
         private const val PREF_MARK_ADULT = "mangalib_mark_adult"
         private const val PREF_HIDE_LICENSED = "mangalib_hide_licensed"
+        private const val PREF_LICENSED = "mangalib_licensed_cache"
+        private const val PREF_NOT_LICENSED = "mangalib_not_licensed_cache"
         private const val ADULT_MARK = "🔞 "
 
         /** 18+ by the age label ("18+") or by its id (4 and 5 are the adult levels). */
@@ -898,7 +962,7 @@ class MangaLib : RuSource() {
         private const val PREF_OAUTH_REFRESH = "mangalib_oauth_refresh"
         private const val PREF_OAUTH_EXPIRES = "mangalib_oauth_expires"
         private const val PREF_LOGIN_DEBUG = "mangalib_login_debug"
-        private const val VERSION_LABEL = "1.4.12"
+        private const val VERSION_LABEL = "1.4.13"
         private const val WEBVIEW_VERIFIER = "tachimanga-sources-for-russians-webview-login-verifier"
         private const val PREF_LOGIN_MODE = "mangalib_login_mode"
         private const val PREF_LOGIN = "mangalib_login"
